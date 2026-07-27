@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 
 from my_vllm.generation.sampler import greedy_sample
+from my_vllm.cache.kv_cache import KVCache
 
 
 class LLM:
@@ -21,19 +22,22 @@ class LLM:
         eos_token_id: int = 2,
     ) -> torch.Tensor:
         generated_ids = []
-        current_ids = input_ids.to(self.device)
+        cache = KVCache()
 
-        for _ in range(max_new_tokens):
-            logits = self.forward(current_ids)
+        logits = cache.prefill(self.model, input_ids.to(self.device))
+        next_token_id = greedy_sample(logits).item()
+        if next_token_id == eos_token_id:
+            return torch.tensor([], dtype=torch.long)
+        generated_ids.append(next_token_id)
+
+        for _ in range(1, max_new_tokens):
+            next_input = torch.tensor(
+                [next_token_id], device=self.device
+            )
+            logits = cache.decode(self.model, next_input)
             next_token_id = greedy_sample(logits).item()
-
             if next_token_id == eos_token_id:
                 break
-
             generated_ids.append(next_token_id)
-            next_tensor = torch.tensor(
-                [[next_token_id]], device=self.device
-            )
-            current_ids = torch.cat([current_ids, next_tensor], dim=1)
 
         return torch.tensor(generated_ids, dtype=torch.long)
