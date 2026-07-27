@@ -3,6 +3,7 @@ import torch.nn as nn
 
 from my_vllm.generation.sampler import greedy_sample
 from my_vllm.cache.kv_cache import KVCache
+from my_vllm.engine.request import Request, RequestStatus
 
 
 class LLM:
@@ -17,18 +18,24 @@ class LLM:
 
     def generate(
         self,
-        input_ids: torch.Tensor,
+        request: Request,
         max_new_tokens: int = 50,
         eos_token_id: int = 2,
-    ) -> torch.Tensor:
-        generated_ids = []
+    ):
+        request.status = RequestStatus.RUNNING
         cache = KVCache()
 
-        logits = cache.prefill(self.model, input_ids.to(self.device))
+        input_ids = torch.tensor(
+            [request.prompt_token_ids], device=self.device
+        )
+        logits = cache.prefill(self.model, input_ids)
         next_token_id = greedy_sample(logits).item()
+
         if next_token_id == eos_token_id:
-            return torch.tensor([], dtype=torch.long)
-        generated_ids.append(next_token_id)
+            request.status = RequestStatus.FINISHED_STOPPED
+            return
+
+        request.output_token_ids.append(next_token_id)
 
         for _ in range(1, max_new_tokens):
             next_input = torch.tensor(
@@ -36,8 +43,11 @@ class LLM:
             )
             logits = cache.decode(self.model, next_input)
             next_token_id = greedy_sample(logits).item()
-            if next_token_id == eos_token_id:
-                break
-            generated_ids.append(next_token_id)
 
-        return torch.tensor(generated_ids, dtype=torch.long)
+            if next_token_id == eos_token_id:
+                request.status = RequestStatus.FINISHED_STOPPED
+                return
+
+            request.output_token_ids.append(next_token_id)
+
+        request.status = RequestStatus.FINISHED_LENGTH_CAPPED
