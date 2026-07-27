@@ -1,35 +1,49 @@
 from my_vllm.cache.kv_cache import KVCache
-from my_vllm.cache.allocator import KVCacheAllocator
+from my_vllm.cache.block import KVCacheBlock
+from my_vllm.cache.block_pool import BlockPool
+from my_vllm.cache.block_table import BlockTable
 from my_vllm.engine.request import Request
 
 
 class KVCacheManager:
-    """Central KV cache lifecycle manager.
+    """KV cache lifecycle manager with block-based allocation.
 
-    Owns the request_id → KVCache mapping and coordinates
-    with the allocator for memory budgeting.
-    Scheduler queries can_allocate() before promoting requests.
+    C009: uses BlockPool + BlockTable instead of continuous
+    allocator, eliminating fragmentation.
     """
 
-    def __init__(self, allocator: KVCacheAllocator | None = None):
-        self.allocator = allocator or KVCacheAllocator()
+    def __init__(
+        self,
+        block_pool: BlockPool | None = None,
+        block_size: int = 16,
+        num_blocks: int = 512,
+    ):
+        self.block_pool = block_pool or BlockPool(num_blocks, block_size)
+        self.block_size = self.block_pool.block_size
         self._caches: dict[str, KVCache] = {}
+        self._block_tables: dict[str, BlockTable] = {}
         self._steps: dict[str, int] = {}
         self._next_token: dict[str, int] = {}
 
-    def can_allocate(self, num_tokens: int) -> bool:
-        return self.allocator.can_allocate(num_tokens)
-
     def allocate(self, request: Request) -> bool:
-        num_tokens = len(request.prompt_token_ids) + 50
-        if not self.allocator.can_allocate(num_tokens):
+        num_tokens = len(request.prompt_token_ids)
+        num_blocks = max(1, (num_tokens + self.block_size - 1)
+                         // self.block_size)
+        blocks = self.block_pool.get_new_blocks(num_blocks)
+        if blocks is None:
             return False
-        self.allocator.reserve(request.request_id, num_tokens)
+        block_table = BlockTable(self.block_size)
+        block_table.append(blocks)
+        self._block_tables[request.request_id] = block_table
         self._caches[request.request_id] = KVCache()
         return True
 
     def get_cache(self, request_id: str) -> KVCache | None:
         return self._caches.get(request_id)
+
+    def get_block_ids(self, request_id: str) -> list[int]:
+        bt = self._block_tables.get(request_id)
+        return bt.block_ids if bt else []
 
     def get_step(self, request_id: str) -> int:
         return self._steps.get(request_id, 0)
@@ -44,7 +58,13 @@ class KVCacheManager:
         self._next_token[request_id] = token
 
     def free(self, request_id: str):
-        self.allocator.release(request_id)
+        bt = self._block_tables.pop(request_id, None)
+        if bt is not None and bt.blocks:
+            self.block_pool.free_blocks(list(bt.blocks))
         self._caches.pop(request_id, None)
         self._steps.pop(request_id, None)
         self._next_token.pop(request_id, None)
+
+    @property
+    def num_free_blocks(self) -> int:
+        return self.block_pool.num_free

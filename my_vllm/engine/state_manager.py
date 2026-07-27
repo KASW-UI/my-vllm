@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 from my_vllm.generation.sampler import greedy_sample
-from my_vllm.cache.allocator import KVCacheAllocator
+from my_vllm.cache.block_pool import BlockPool
 from my_vllm.cache.kv_cache_manager import KVCacheManager
 from my_vllm.engine.request import Request, RequestStatus
 from my_vllm.scheduler.scheduler import Scheduler
@@ -11,8 +11,7 @@ from my_vllm.scheduler.scheduler import Scheduler
 class StateManager:
     """Execution engine driven by Scheduler + KVCacheManager.
 
-    C008: KV cache management delegated to KVCacheManager.
-    Scheduler now queries KVCacheManager before promoting requests.
+    C009: KVCacheManager now uses BlockPool for paged allocation.
     """
 
     def __init__(
@@ -22,15 +21,18 @@ class StateManager:
         max_new_tokens: int = 50,
         eos_token_id: int = 2,
         max_running: int = 8,
-        max_kv_tokens: int = 8192,
+        num_kv_blocks: int = 512,
+        block_size: int = 16,
     ):
         self.model = model
         self.device = device
         self.max_new_tokens = max_new_tokens
         self.eos_token_id = eos_token_id
 
-        allocator = KVCacheAllocator(max_total_tokens=max_kv_tokens)
-        self.kv_cache_manager = KVCacheManager(allocator=allocator)
+        block_pool = BlockPool(num_kv_blocks, block_size)
+        self.kv_cache_manager = KVCacheManager(
+            block_pool=block_pool,
+        )
         self.scheduler = Scheduler(
             max_running=max_running,
             kv_cache_manager=self.kv_cache_manager,
