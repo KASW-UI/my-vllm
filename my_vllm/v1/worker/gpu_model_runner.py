@@ -9,6 +9,10 @@ per step instead of looping over individual requests.
 C019: adds BlockTables GPU tensor management.  New requests'
 block IDs are written to the BlockTable; slot_mappings are
 computed and attached to InputBatch.
+
+C020: RequestState replaces Python dicts for per-request state
+(_steps, _next_token, _req_index).  GPU tensors store token
+history, computed token counts, and last sampled tokens.
 """
 
 import torch
@@ -20,6 +24,7 @@ from my_vllm.v1.core.sched.output import SchedulerOutput
 from my_vllm.v1.outputs import ModelRunnerOutput
 from my_vllm.v1.worker.gpu.block_table import BlockTables
 from my_vllm.v1.worker.gpu.input_batch import InputBatch
+from my_vllm.v1.worker.gpu.states import RequestState
 
 
 class GPUModelRunner:
@@ -32,6 +37,7 @@ class GPUModelRunner:
         max_num_reqs: int = 64,
         max_num_blocks: int = 256,
         max_num_batched_tokens: int = 4096,
+        max_model_len: int = 4096,
     ):
         self.model = model
         self.device = device
@@ -39,12 +45,12 @@ class GPUModelRunner:
         self.block_size = block_size
 
         self._kv_caches: dict[str, KVCache] = {}
-        self._steps: dict[str, int] = {}
-        self._next_token: dict[str, int] = {}
 
-        # Per-request GPU slot index (reuses slot when request finishes)
-        self._req_index: dict[str, int] = {}
-        self._free_indices: list[int] = list(range(max_num_reqs))
+        self.request_state = RequestState(
+            max_num_reqs=max_num_reqs,
+            max_model_len=max_model_len,
+            device=device,
+        )
 
         self.block_tables = BlockTables(
             block_size=block_size,
@@ -60,15 +66,16 @@ class GPUModelRunner:
         new_req_ids = {d.req_id for d in scheduler_output.scheduled_new_reqs}
         sampled_tokens: dict[str, list[int]] = {}
 
-        # Assign GPU slots to new requests and populate block tables
+        # Register new requests with RequestState and BlockTables
         prefill_datas = []
         for d in scheduler_output.scheduled_new_reqs:
             if d.req_id not in new_req_ids:
                 continue
-            if d.req_id not in self._req_index:
-                idx = self._acquire_index()
-                self._req_index[d.req_id] = idx
-            idx = self._req_index[d.req_id]
+            if d.req_id not in self.request_state.req_id_to_index:
+                self.request_state.add_request(
+                    d.req_id, d.prompt_token_ids
+                )
+            idx = self.request_state.get_index(d.req_id)
             self.block_tables.append_block_ids(idx, d.block_ids)
             prefill_datas.append(d)
 
@@ -76,8 +83,7 @@ class GPUModelRunner:
         if prefill_datas:
             prefill_results = self._prefill_batch(prefill_datas)
             for rid, token in prefill_results.items():
-                self._steps[rid] = 1
-                self._next_token[rid] = token
+                self.request_state.set_last_sampled_token(rid, token)
                 sampled_tokens.setdefault(rid, []).append(token)
 
         # 2. Decode — per-request with HF past_key_values
@@ -86,24 +92,13 @@ class GPUModelRunner:
                 continue
             token = self._decode_one(rid)
             if token is not None:
-                self._steps[rid] = self._steps.get(rid, 0) + 1
+                self.request_state.append_output_token(rid, token)
                 sampled_tokens.setdefault(rid, []).append(token)
 
         return ModelRunnerOutput(
             req_ids=list(sampled_tokens.keys()),
             sampled_token_ids=sampled_tokens,
         )
-
-    def _acquire_index(self) -> int:
-        if self._free_indices:
-            return self._free_indices.pop(0)
-        raise RuntimeError("No free request slots — increase max_num_reqs")
-
-    def _release_index(self, request_id: str):
-        idx = self._req_index.pop(request_id, None)
-        if idx is not None:
-            self._free_indices.append(idx)
-            self.block_tables.num_blocks[idx] = 0
 
     def _prefill_batch(
         self, new_datas: list
@@ -138,10 +133,7 @@ class GPUModelRunner:
             )
             req_ids.append(d.req_id)
 
-        # Compute slot_mappings for prefill tokens
-        req_indices = [
-            self._req_index.get(rid, 0) for rid in req_ids
-        ]
+        # Compute slot_mappings
         query_start = torch.tensor(
             [0] + [len(d.prompt_token_ids) for d in new_datas],
             dtype=torch.long, device=self.device,
@@ -182,19 +174,21 @@ class GPUModelRunner:
         if cache is None:
             return None
 
-        token = self._next_token.get(request_id)
-        if token is None:
+        token = self.request_state.get_last_token(request_id)
+        if token == 0 and self.request_state.get_step(request_id) > 0:
             return None
 
         next_input = torch.tensor([token], device=self.device)
         logits = cache.decode(self.model, next_input)
         next_token = greedy_sample(logits).item()
-        self._next_token[request_id] = next_token
+        self.request_state.set_last_sampled_token(request_id, next_token)
 
         if next_token == self.eos_token_id:
             return None
 
         return next_token
+
+    # --- legacy methods (bridge compat) ---
 
     def _prefill_one(
         self, request_id: str,
@@ -203,29 +197,31 @@ class GPUModelRunner:
         logits = cache.prefill(self.model, input_ids)
         self._kv_caches[request_id] = cache
         token = greedy_sample(logits).item()
-        self._steps[request_id] = 1
-        self._next_token[request_id] = token
+        if request_id not in self.request_state.req_id_to_index:
+            self.request_state.add_request(request_id, [0])
+        self.request_state.set_last_sampled_token(request_id, token)
         return token
 
     def _decode_one_legacy(
         self, request_id: str, cache: KVCache
     ) -> int:
         self._kv_caches[request_id] = cache
-        token = self._next_token.get(request_id)
-        if token is None:
+        token = self.request_state.get_last_token(request_id)
+        if token == 0:
             return self.eos_token_id
         next_input = torch.tensor([token], device=self.device)
         logits = cache.decode(self.model, next_input)
         next_token = greedy_sample(logits).item()
-        self._next_token[request_id] = next_token
-        self._steps[request_id] = self._steps.get(request_id, 0) + 1
+        self.request_state.set_last_sampled_token(request_id, next_token)
+        self.request_state.append_output_token(request_id, next_token)
         return next_token
 
     def get_step(self, request_id: str) -> int:
-        return self._steps.get(request_id, 0)
+        return self.request_state.get_step(request_id)
 
     def cleanup(self, request_id: str):
         self._kv_caches.pop(request_id, None)
-        self._steps.pop(request_id, None)
-        self._next_token.pop(request_id, None)
-        self._release_index(request_id)
+        idx = self.request_state.req_id_to_index.get(request_id)
+        if idx is not None:
+            self.block_tables.num_blocks[idx] = 0
+        self.request_state.remove_request(request_id)
