@@ -19,9 +19,9 @@ def test_scheduler_fcfs():
 
     # Schedule — should promote 2 (max_running)
     new = sched.schedule()
-    assert len(new) == 2
-    assert new[0].request_id == "A"  # FCFS order
-    assert new[1].request_id == "B"
+    assert len(new.scheduled_new_reqs) == 2
+    assert new.scheduled_new_reqs[0].req_id == "A"
+    assert new.scheduled_new_reqs[1].req_id == "B"
     assert len(sched.waiting) == 1
     assert len(sched.running) == 2
     assert req_a.status == RequestStatus.RUNNING
@@ -34,8 +34,8 @@ def test_scheduler_fcfs():
 
     # Schedule again — C should be promoted
     new = sched.schedule()
-    assert len(new) == 1
-    assert new[0].request_id == "C"
+    assert len(new.scheduled_new_reqs) == 1
+    assert new.scheduled_new_reqs[0].req_id == "C"
     assert len(sched.waiting) == 0
     assert len(sched.running) == 2
     assert req_c.status == RequestStatus.RUNNING

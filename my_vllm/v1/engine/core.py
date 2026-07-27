@@ -2,20 +2,19 @@ import torch
 
 from my_vllm.cache.block_pool import BlockPool
 from my_vllm.cache.kv_cache_manager import KVCacheManager
+from my_vllm.v1.core.sched.output import SchedulerOutput
+from my_vllm.v1.core.sched.scheduler import Scheduler
 from my_vllm.executor.uniproc_executor import Executor
-from my_vllm.scheduler.scheduler import Scheduler
 from my_vllm.v1.request import Request, RequestStatus
 
 
 class EngineCore:
     """Core execution loop — mirrors vLLM V1 v1/engine/core.py:EngineCore.
 
-    C015: migrated from StateManager (engine/state_manager.py).
-    Renamed only; internal execution model is unchanged:
-    per-request loops with HF past_key_values.
-
-    Scheduler → Executor → Worker flow stays in old paths;
-    migration to v1/core/ and v1/worker/ happens in C016-C018.
+    C016: uses Scheduler from v1/core/sched/ with structured SchedulerOutput.
+    schedule() returns SchedulerOutput (new_reqs + cached_reqs) instead of
+    plain list[Request].  Internal execution model remains per-request loops
+    with HF past_key_values.
     """
 
     def __init__(
@@ -52,11 +51,12 @@ class EngineCore:
     def step(self) -> list[Request]:
         newly_finished: list[Request] = []
 
-        new_requests = self.scheduler.schedule()
-        for req in new_requests:
-            self._prefill(req)
+        scheduler_output = self.scheduler.schedule()
+        new_req_ids = {d.req_id for d in scheduler_output.scheduled_new_reqs}
 
         for req in self.scheduler.running:
+            if req.request_id in new_req_ids:
+                self._prefill(req)
             self._decode_step(req)
 
         for req in list(self.scheduler.running):
@@ -79,7 +79,7 @@ class EngineCore:
         if cache is None:
             req.status = RequestStatus.WAITING
             self.scheduler.finish(req)
-            self.scheduler.waiting.insert(0, req)
+            self.scheduler.waiting.prepend_request(req)
             return
 
         input_ids = torch.tensor(

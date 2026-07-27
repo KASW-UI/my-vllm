@@ -82,7 +82,7 @@ def test_scheduler_blocks_when_no_free_blocks():
     # First request: 100 tokens → ceil(100/16) = 7 blocks
     # But only 5 blocks total! So nothing should schedule.
     new = sched.schedule()
-    assert len(new) == 0
+    assert len(new.scheduled_new_reqs) == 0
     assert len(sched.waiting) == 3
     assert len(sched.running) == 0
     assert req.status == RequestStatus.WAITING
@@ -106,9 +106,9 @@ def test_scheduler_schedules_with_enough_blocks():
     sched.add_request(req_c)
 
     new = sched.schedule()
-    assert len(new) == 2  # max_running=2
-    assert new[0].request_id == "A"
-    assert new[1].request_id == "B"
+    assert len(new.scheduled_new_reqs) == 2  # max_running=2
+    assert new.scheduled_new_reqs[0].req_id == "A"
+    assert new.scheduled_new_reqs[1].req_id == "B"
     assert list(pool._free_ids) == [5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
                                     15, 16, 17, 18, 19]  # 15 free
     print("Scheduler schedules with enough blocks")
