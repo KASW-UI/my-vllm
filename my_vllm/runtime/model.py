@@ -4,6 +4,7 @@ import torch.nn as nn
 from my_vllm.generation.sampler import greedy_sample
 from my_vllm.cache.kv_cache import KVCache
 from my_vllm.engine.request import Request, RequestStatus
+from my_vllm.batch.batch_executor import BatchExecutor
 
 
 class LLM:
@@ -51,3 +52,12 @@ class LLM:
             request.output_token_ids.append(next_token_id)
 
         request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+
+    def generate_batch(
+        self,
+        requests: list[Request],
+        max_new_tokens: int = 50,
+        eos_token_id: int = 2,
+    ):
+        executor = BatchExecutor(self.model, self.device)
+        executor.execute(requests, max_new_tokens, eos_token_id)
