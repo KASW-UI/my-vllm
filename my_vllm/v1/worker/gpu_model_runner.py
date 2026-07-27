@@ -13,6 +13,10 @@ computed and attached to InputBatch.
 C020: RequestState replaces Python dicts for per-request state
 (_steps, _next_token, _req_index).  GPU tensors store token
 history, computed token counts, and last sampled tokens.
+
+C022: builds CommonAttentionMetadata from InputBatch +
+BlockTables fields. Metadata not yet consumed by model forward
+(HF attention → C023 PagedAttention).
 """
 
 import torch
@@ -20,6 +24,8 @@ import torch.nn as nn
 
 from my_vllm.cache.kv_cache import KVCache
 from my_vllm.generation.sampler import greedy_sample
+from my_vllm.v1.attention.metadata import CommonAttentionMetadata
+from my_vllm.v1.attention.selector import get_attn_backend
 from my_vllm.v1.core.sched.output import SchedulerOutput
 from my_vllm.v1.outputs import ModelRunnerOutput
 from my_vllm.v1.worker.gpu.block_table import BlockTables
@@ -59,6 +65,9 @@ class GPUModelRunner:
             max_num_batched_tokens=max_num_batched_tokens,
             device=device,
         )
+
+        self.attn_backend_cls = get_attn_backend()
+        self.attn_metadata: CommonAttentionMetadata | None = None
 
     def execute_model(
         self, scheduler_output: SchedulerOutput
@@ -144,6 +153,14 @@ class GPUModelRunner:
             query_start, flat_positions, num_tokens
         )
 
+        self.attn_metadata = self._build_attn_metadata(
+            num_reqs=batch_size,
+            query_start_loc=query_start,
+            positions=flat_positions,
+            num_tokens=num_tokens,
+            max_query_len=max_len,
+        )
+
         with torch.no_grad():
             outputs = self.model(
                 input_ids=input_ids,
@@ -187,6 +204,35 @@ class GPUModelRunner:
             return None
 
         return next_token
+
+    def _build_attn_metadata(
+        self,
+        num_reqs: int,
+        query_start_loc: torch.Tensor,
+        positions: torch.Tensor,
+        num_tokens: int,
+        max_query_len: int,
+    ) -> CommonAttentionMetadata:
+        """Build CommonAttentionMetadata for the current batch."""
+        seq_lens = torch.tensor(
+            [self.request_state.get_step(rid) for rid in
+             self.request_state.req_id_to_index],
+            dtype=torch.int32, device=self.device,
+        )[:num_reqs]
+
+        return CommonAttentionMetadata(
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc.cpu(),
+            seq_lens=seq_lens,
+            seq_lens_cpu=seq_lens.cpu(),
+            num_reqs=num_reqs,
+            num_actual_tokens=num_tokens,
+            max_query_len=max_query_len,
+            max_seq_len=max_query_len,
+            block_table_tensor=self.block_tables.block_table[:num_reqs],
+            slot_mapping=self.block_tables.slot_mappings[:num_tokens],
+            positions=positions,
+        )
 
     # --- legacy methods (bridge compat) ---
 
