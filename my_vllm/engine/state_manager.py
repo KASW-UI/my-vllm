@@ -57,7 +57,8 @@ class StateManager:
         for req in list(self.scheduler.running):
             rid = req.request_id
             step = self.worker.get_step(rid)
-            if step >= self.max_new_tokens:
+            limit = getattr(req, "max_tokens", self.max_new_tokens)
+            if step >= limit:
                 req.status = RequestStatus.FINISHED_LENGTH_CAPPED
                 self.kv_cache_manager.free(rid)
                 self.worker.cleanup(rid)
