@@ -36,7 +36,7 @@ class LLM:
             request.status = RequestStatus.FINISHED_STOPPED
             return
 
-        request.output_token_ids.append(next_token_id)
+        request.append_output_token_ids(next_token_id)
 
         for _ in range(1, max_new_tokens):
             next_input = torch.tensor(
@@ -49,7 +49,7 @@ class LLM:
                 request.status = RequestStatus.FINISHED_STOPPED
                 return
 
-            request.output_token_ids.append(next_token_id)
+            request.append_output_token_ids(next_token_id)
 
         request.status = RequestStatus.FINISHED_LENGTH_CAPPED
 

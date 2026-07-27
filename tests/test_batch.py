@@ -30,7 +30,7 @@ def test_batch_output_correct():
     for req in requests:
         assert len(req.output_token_ids) >= 1
         assert len(req.output_token_ids) <= max_new_tokens
-        assert req.status.value >= 2  # FINISHED
+        assert req.is_finished()
         text = tokenizer.decode(req.output_token_ids)
         assert len(text) > 0
         print(f"[{req.request_id}] status={req.status.name} "

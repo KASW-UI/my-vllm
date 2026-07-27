@@ -93,6 +93,6 @@ def test_scheduler_full_e2e():
     for req in sm.finished:
         text = tokenizer.decode(req.output_token_ids)
         assert len(text) > 0
-        assert req.status.value >= 2
+        assert req.is_finished()
         print(f"[{req.request_id}] {req.status.name} "
               f"({len(req.output_token_ids)} tokens): ...{text[-30:]!r}")

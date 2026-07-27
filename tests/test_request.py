@@ -12,8 +12,8 @@ def test_request_lifecycle():
 
     # Simulate RUNNING
     request.status = RequestStatus.RUNNING
-    request.output_token_ids.append(400)
-    request.output_token_ids.append(500)
+    request.append_output_token_ids(400)
+    request.append_output_token_ids(500)
     assert request.status == RequestStatus.RUNNING
     assert len(request.output_token_ids) == 2
 

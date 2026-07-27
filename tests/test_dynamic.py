@@ -38,7 +38,7 @@ def test_dynamic_lifecycle():
         finished = sm.step()
         step_count += 1
         for req in finished:
-            assert req.status.value >= 2  # FINISHED
+            assert req.is_finished()
             assert 1 <= len(req.output_token_ids) <= max_new_tokens
 
     assert step_count > 0
@@ -90,7 +90,7 @@ def test_partial_join():
     while sm.has_work():
         sm.step()
 
-    assert req_a.status.value >= 2
-    assert req_b.status.value >= 2
+    assert req_a.is_finished()
+    assert req_b.is_finished()
     print(f"A: {tokenizer.decode(req_a.output_token_ids)!r}")
     print(f"B: {tokenizer.decode(req_b.output_token_ids)!r}")
