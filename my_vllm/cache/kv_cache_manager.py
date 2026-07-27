@@ -1,5 +1,4 @@
 from my_vllm.cache.kv_cache import KVCache
-from my_vllm.cache.block import KVCacheBlock
 from my_vllm.cache.block_pool import BlockPool
 from my_vllm.cache.block_table import BlockTable
 from my_vllm.engine.request import Request
@@ -8,8 +7,8 @@ from my_vllm.engine.request import Request
 class KVCacheManager:
     """KV cache lifecycle manager with block-based allocation.
 
-    C009: uses BlockPool + BlockTable instead of continuous
-    allocator, eliminating fragmentation.
+    C010: execution state (_steps/_next_token) moved to ModelRunner.
+    KVCacheManager now purely manages blocks and KVCache instances.
     """
 
     def __init__(
@@ -22,8 +21,6 @@ class KVCacheManager:
         self.block_size = self.block_pool.block_size
         self._caches: dict[str, KVCache] = {}
         self._block_tables: dict[str, BlockTable] = {}
-        self._steps: dict[str, int] = {}
-        self._next_token: dict[str, int] = {}
 
     def allocate(self, request: Request) -> bool:
         num_tokens = len(request.prompt_token_ids)
@@ -45,25 +42,11 @@ class KVCacheManager:
         bt = self._block_tables.get(request_id)
         return bt.block_ids if bt else []
 
-    def get_step(self, request_id: str) -> int:
-        return self._steps.get(request_id, 0)
-
-    def set_step(self, request_id: str, step: int):
-        self._steps[request_id] = step
-
-    def get_next_token(self, request_id: str) -> int | None:
-        return self._next_token.get(request_id)
-
-    def set_next_token(self, request_id: str, token: int):
-        self._next_token[request_id] = token
-
     def free(self, request_id: str):
         bt = self._block_tables.pop(request_id, None)
         if bt is not None and bt.blocks:
             self.block_pool.free_blocks(list(bt.blocks))
         self._caches.pop(request_id, None)
-        self._steps.pop(request_id, None)
-        self._next_token.pop(request_id, None)
 
     @property
     def num_free_blocks(self) -> int:

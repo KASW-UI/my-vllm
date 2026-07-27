@@ -58,8 +58,7 @@ def test_kv_cache_manager_blocks():
     assert len(block_ids) == 2
     assert block_ids == [0, 1]
 
-    mgr.set_step(req.request_id, 5)
-    assert mgr.get_step(req.request_id) == 5
+    assert mgr.num_free_blocks == 48
 
     mgr.free(req.request_id)
     assert mgr.get_cache(req.request_id) is None

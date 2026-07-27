@@ -1,17 +1,18 @@
 import torch
 import torch.nn as nn
 
-from my_vllm.generation.sampler import greedy_sample
 from my_vllm.cache.block_pool import BlockPool
 from my_vllm.cache.kv_cache_manager import KVCacheManager
 from my_vllm.engine.request import Request, RequestStatus
 from my_vllm.scheduler.scheduler import Scheduler
+from my_vllm.worker.model_runner import ModelRunner
 
 
 class StateManager:
-    """Execution engine driven by Scheduler + KVCacheManager.
+    """Execution engine: Scheduler → ModelRunner → KVCacheManager.
 
-    C009: KVCacheManager now uses BlockPool for paged allocation.
+    C010: ModelRunner extracted — StateManager no longer touches
+    model forward or sampling directly.
     """
 
     def __init__(
@@ -24,14 +25,14 @@ class StateManager:
         num_kv_blocks: int = 512,
         block_size: int = 16,
     ):
-        self.model = model
-        self.device = device
         self.max_new_tokens = max_new_tokens
         self.eos_token_id = eos_token_id
+        self.device = device
 
         block_pool = BlockPool(num_kv_blocks, block_size)
-        self.kv_cache_manager = KVCacheManager(
-            block_pool=block_pool,
+        self.kv_cache_manager = KVCacheManager(block_pool=block_pool)
+        self.runner = ModelRunner(
+            model, device, eos_token_id=eos_token_id
         )
         self.scheduler = Scheduler(
             max_running=max_running,
@@ -57,10 +58,11 @@ class StateManager:
 
         for req in list(self.scheduler.running):
             rid = req.request_id
-            step = self.kv_cache_manager.get_step(rid)
+            step = self.runner.get_step(rid)
             if step >= self.max_new_tokens:
                 req.status = RequestStatus.FINISHED_LENGTH_CAPPED
                 self.kv_cache_manager.free(rid)
+                self.runner.cleanup(rid)
                 self.scheduler.finish(req)
                 self.finished.append(req)
                 newly_finished.append(req)
@@ -75,22 +77,21 @@ class StateManager:
             self.scheduler.finish(req)
             self.scheduler.waiting.insert(0, req)
             return
+
         input_ids = torch.tensor(
             [req.prompt_token_ids], device=self.device
         )
-        logits = cache.prefill(self.model, input_ids)
-        first = greedy_sample(logits).item()
+        first = self.runner.prefill(rid, input_ids, cache)
 
         if first == self.eos_token_id:
             req.status = RequestStatus.FINISHED_STOPPED
             self.kv_cache_manager.free(rid)
+            self.runner.cleanup(rid)
             self.scheduler.finish(req)
             self.finished.append(req)
             return
 
         req.output_token_ids.append(first)
-        self.kv_cache_manager.set_step(rid, 1)
-        self.kv_cache_manager.set_next_token(rid, first)
 
     def _decode_step(self, req: Request):
         rid = req.request_id
@@ -98,20 +99,14 @@ class StateManager:
         if cache is None:
             return
 
-        token = self.kv_cache_manager.get_next_token(rid)
-        step = self.kv_cache_manager.get_step(rid)
-
-        next_input = torch.tensor([token], device=self.device)
-        logits = cache.decode(self.model, next_input)
-        next_token = greedy_sample(logits).item()
+        next_token = self.runner.decode(rid, cache)
 
         if next_token == self.eos_token_id:
             req.status = RequestStatus.FINISHED_STOPPED
             self.kv_cache_manager.free(rid)
+            self.runner.cleanup(rid)
             self.scheduler.finish(req)
             self.finished.append(req)
             return
 
         req.output_token_ids.append(next_token)
-        self.kv_cache_manager.set_next_token(rid, next_token)
-        self.kv_cache_manager.set_step(rid, step + 1)
