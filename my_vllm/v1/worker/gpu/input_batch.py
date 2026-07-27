@@ -2,14 +2,12 @@
 
 Mirrors vLLM V1 v1/worker/gpu/input_batch.py structure.
 
-C017: base fields only (req_ids, input_ids, positions, seq_lens).
-Extended in later commits:
-  C019 → +slot_mapping, +block_table_tensor
-  C022 → +query_start_loc, +is_prefilling, +num_computed_tokens_np
+C019: +block_table_tensor, +slot_mapping fields from BlockTables.
 """
 
 from dataclasses import dataclass, field
 
+import numpy as np
 import torch
 
 
@@ -21,3 +19,6 @@ class InputBatch:
     input_ids: torch.Tensor | None = None
     positions: torch.Tensor | None = None
     seq_lens: torch.Tensor | None = None
+    block_table_tensor: torch.Tensor | None = None
+    slot_mapping: torch.Tensor | None = None
+    query_start_loc: torch.Tensor | None = None

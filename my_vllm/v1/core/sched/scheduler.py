@@ -42,6 +42,7 @@ class Scheduler:
 
     def schedule(self) -> SchedulerOutput:
         new_requests: list[Request] = []
+        new_blocks: dict[str, list[int]] = {}
         while len(self.running) < self.max_running and self.waiting:
             req = self.waiting.pop_request()
 
@@ -52,6 +53,7 @@ class Scheduler:
                 if blocks is None:
                     self.waiting.prepend_request(req)
                     break
+                new_blocks[req.request_id] = list(blocks.block_ids)
 
             req.status = RequestStatus.RUNNING
             self.running.append(req)
@@ -61,6 +63,7 @@ class Scheduler:
             NewRequestData(
                 req_id=r.request_id,
                 prompt_token_ids=r.prompt_token_ids,
+                block_ids=new_blocks.get(r.request_id, []),
             )
             for r in new_requests
         ]
