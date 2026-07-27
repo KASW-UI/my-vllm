@@ -62,7 +62,7 @@ def test_partial_join():
     # Run a few steps with only one request
     for _ in range(3):
         sm.step()
-    assert len(sm.running) == 1
+        assert len(sm.scheduler.running) == 1
     assert req_a.status == RequestStatus.RUNNING
 
     # Add a second request mid-execution
@@ -74,7 +74,7 @@ def test_partial_join():
     sm.step()
     # After one more step, B should be promoted to running
     assert req_b.status == RequestStatus.RUNNING
-    assert len(sm.running) <= 2
+    assert len(sm.scheduler.running) <= 2
 
     # Run to completion
     while sm.has_work():
