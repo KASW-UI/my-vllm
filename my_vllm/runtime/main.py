@@ -3,6 +3,7 @@ from .model_loader import load_model
 from my_vllm.engine.request import Request
 from my_vllm.engine.state_manager import StateManager
 from my_vllm.worker.gpu_worker import Worker
+from my_vllm.executor.uniproc_executor import UniProcExecutor
 
 
 def run(
@@ -22,8 +23,10 @@ def run(
     hf_model = load_model(model_name)
 
     worker = Worker(hf_model, hf_model.device)
+    worker.init_device()
+    executor = UniProcExecutor(worker)
     sm = StateManager(
-        worker, hf_model.device, max_new_tokens=max_new_tokens
+        executor, hf_model.device, max_new_tokens=max_new_tokens
     )
 
     for i, prompt in enumerate(prompts):

@@ -1,13 +1,16 @@
 from abc import ABC, abstractmethod
 
-from my_vllm.worker.model_runner import ModelRunner
+import torch
+
+from my_vllm.cache.kv_cache import KVCache
 
 
 class WorkerBase(ABC):
-    """Abstract worker interface (C011).
+    """Abstract worker interface (C012).
 
-    Owns the model and ModelRunner.  External code should only
-    interact with the worker through this interface.
+    External code interacts with the worker only through
+    execute_prefill / execute_decode — never through
+    ModelRunner directly.
     """
 
     @abstractmethod
@@ -15,5 +18,22 @@ class WorkerBase(ABC):
         ...
 
     @abstractmethod
-    def get_model_runner(self) -> ModelRunner:
+    def execute_prefill(
+        self, request_id: str,
+        input_ids: torch.Tensor, cache: KVCache
+    ) -> int:
+        ...
+
+    @abstractmethod
+    def execute_decode(
+        self, request_id: str, cache: KVCache
+    ) -> int:
+        ...
+
+    @abstractmethod
+    def get_step(self, request_id: str) -> int:
+        ...
+
+    @abstractmethod
+    def cleanup(self, request_id: str):
         ...

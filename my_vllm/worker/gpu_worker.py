@@ -3,13 +3,15 @@ import torch.nn as nn
 
 from my_vllm.worker.worker_base import WorkerBase
 from my_vllm.worker.model_runner import ModelRunner
+from my_vllm.cache.kv_cache import KVCache
 
 
 class Worker(WorkerBase):
-    """GPU Worker — owns model and ModelRunner (C011).
+    """GPU Worker — owns model and ModelRunner (C012).
 
-    Encapsulates device initialization and model lifecycle.
-    StateManager accesses ModelRunner through Worker.
+    Encapsulates all GPU execution.  StateManager calls
+    execute_prefill / execute_decode — never reaches
+    ModelRunner directly.
     """
 
     def __init__(
@@ -29,7 +31,24 @@ class Worker(WorkerBase):
             self.model, self.device, eos_token_id=self.eos_token_id
         )
 
-    def get_model_runner(self) -> ModelRunner:
+    def _runner(self) -> ModelRunner:
         if self._model_runner is None:
             self.init_device()
         return self._model_runner
+
+    def execute_prefill(
+        self, request_id: str,
+        input_ids: torch.Tensor, cache: KVCache
+    ) -> int:
+        return self._runner().prefill(request_id, input_ids, cache)
+
+    def execute_decode(
+        self, request_id: str, cache: KVCache
+    ) -> int:
+        return self._runner().decode(request_id, cache)
+
+    def get_step(self, request_id: str) -> int:
+        return self._runner().get_step(request_id)
+
+    def cleanup(self, request_id: str):
+        self._runner().cleanup(request_id)

@@ -3,6 +3,7 @@ from my_vllm.runtime.model_loader import load_model
 from my_vllm.engine.request import Request, RequestStatus
 from my_vllm.engine.state_manager import StateManager
 from my_vllm.worker.gpu_worker import Worker
+from my_vllm.executor.uniproc_executor import UniProcExecutor
 
 
 def test_dynamic_lifecycle():
@@ -17,8 +18,11 @@ def test_dynamic_lifecycle():
     tokenizer = load_tokenizer(model_name)
     hf_model = load_model(model_name)
 
+    worker = Worker(hf_model, hf_model.device)
+    worker.init_device()
+    executor = UniProcExecutor(worker)
     sm = StateManager(
-        Worker(hf_model, hf_model.device), hf_model.device,
+        executor, hf_model.device,
         max_new_tokens=max_new_tokens
     )
 
@@ -53,8 +57,11 @@ def test_partial_join():
     tokenizer = load_tokenizer(model_name)
     hf_model = load_model(model_name)
 
+    worker = Worker(hf_model, hf_model.device)
+    worker.init_device()
+    executor = UniProcExecutor(worker)
     sm = StateManager(
-        Worker(hf_model, hf_model.device), hf_model.device,
+        executor, hf_model.device,
         max_new_tokens=10, max_running=2
     )
 

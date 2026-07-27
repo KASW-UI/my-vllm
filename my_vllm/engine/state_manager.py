@@ -4,19 +4,18 @@ from my_vllm.cache.block_pool import BlockPool
 from my_vllm.cache.kv_cache_manager import KVCacheManager
 from my_vllm.engine.request import Request, RequestStatus
 from my_vllm.scheduler.scheduler import Scheduler
-from my_vllm.worker.worker_base import WorkerBase
+from my_vllm.executor.uniproc_executor import Executor
 
 
 class StateManager:
-    """Execution engine: Scheduler → Worker → KVCacheManager.
+    """Execution engine: Scheduler → Executor → Worker → KVCacheManager.
 
-    C011: accesses ModelRunner through Worker instead of
-    holding model directly.
+    C012: accesses Worker exclusively through Executor.
     """
 
     def __init__(
         self,
-        worker: WorkerBase,
+        executor: Executor,
         device: torch.device,
         max_new_tokens: int = 50,
         eos_token_id: int = 2,
@@ -28,9 +27,8 @@ class StateManager:
         self.eos_token_id = eos_token_id
         self.device = device
 
-        worker.init_device()
-        self.worker = worker
-        self.runner = worker.get_model_runner()
+        self.executor = executor
+        self.worker = executor.get_worker()
 
         block_pool = BlockPool(num_kv_blocks, block_size)
         self.kv_cache_manager = KVCacheManager(block_pool=block_pool)
@@ -58,11 +56,11 @@ class StateManager:
 
         for req in list(self.scheduler.running):
             rid = req.request_id
-            step = self.runner.get_step(rid)
+            step = self.worker.get_step(rid)
             if step >= self.max_new_tokens:
                 req.status = RequestStatus.FINISHED_LENGTH_CAPPED
                 self.kv_cache_manager.free(rid)
-                self.runner.cleanup(rid)
+                self.worker.cleanup(rid)
                 self.scheduler.finish(req)
                 self.finished.append(req)
                 newly_finished.append(req)
@@ -81,12 +79,12 @@ class StateManager:
         input_ids = torch.tensor(
             [req.prompt_token_ids], device=self.device
         )
-        first = self.runner.prefill(rid, input_ids, cache)
+        first = self.worker.execute_prefill(rid, input_ids, cache)
 
         if first == self.eos_token_id:
             req.status = RequestStatus.FINISHED_STOPPED
             self.kv_cache_manager.free(rid)
-            self.runner.cleanup(rid)
+            self.worker.cleanup(rid)
             self.scheduler.finish(req)
             self.finished.append(req)
             return
@@ -99,12 +97,12 @@ class StateManager:
         if cache is None:
             return
 
-        next_token = self.runner.decode(rid, cache)
+        next_token = self.worker.execute_decode(rid, cache)
 
         if next_token == self.eos_token_id:
             req.status = RequestStatus.FINISHED_STOPPED
             self.kv_cache_manager.free(rid)
-            self.runner.cleanup(rid)
+            self.worker.cleanup(rid)
             self.scheduler.finish(req)
             self.finished.append(req)
             return

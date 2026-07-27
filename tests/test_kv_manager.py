@@ -121,13 +121,17 @@ def test_kv_cache_manager_e2e():
     from my_vllm.runtime.model_loader import load_model
     from my_vllm.engine.state_manager import StateManager
     from my_vllm.worker.gpu_worker import Worker
+    from my_vllm.executor.uniproc_executor import UniProcExecutor
 
     model_name = "/home/kasw/文档/GitHub/cpu-vllm/opt-125m"
     tokenizer = load_tokenizer(model_name)
     hf_model = load_model(model_name)
 
+    worker = Worker(hf_model, hf_model.device)
+    worker.init_device()
+    executor = UniProcExecutor(worker)
     sm = StateManager(
-        Worker(hf_model, hf_model.device), hf_model.device,
+        executor, hf_model.device,
         max_new_tokens=10, max_running=2,
         num_kv_blocks=256, block_size=16,
     )
