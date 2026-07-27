@@ -1,8 +1,7 @@
 import torch
 
-from my_vllm.cache.block_pool import BlockPool
-from my_vllm.cache.kv_cache_manager import KVCacheManager
-from my_vllm.v1.core.sched.output import SchedulerOutput
+from my_vllm.v1.core.block_pool import BlockPool
+from my_vllm.v1.core.kv_cache_manager import KVCacheManager
 from my_vllm.v1.core.sched.scheduler import Scheduler
 from my_vllm.v1.executor.abstract import Executor
 from my_vllm.v1.request import Request, RequestStatus

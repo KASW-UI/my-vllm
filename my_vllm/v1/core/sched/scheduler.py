@@ -6,7 +6,7 @@ FCFSRequestQueue replaces plain list for waiting queue.
 Internal execution model unchanged (per-request, HF past_key_values).
 """
 
-from my_vllm.cache.kv_cache_manager import KVCacheManager
+from my_vllm.v1.core.kv_cache_manager import KVCacheManager
 from my_vllm.v1.core.sched.output import (
     CachedRequestData,
     NewRequestData,
@@ -46,7 +46,10 @@ class Scheduler:
             req = self.waiting.pop_request()
 
             if self.kv_cache_manager is not None:
-                if not self.kv_cache_manager.allocate(req):
+                blocks = self.kv_cache_manager.allocate_slots(
+                    req, len(req.prompt_token_ids)
+                )
+                if blocks is None:
                     self.waiting.prepend_request(req)
                     break
 

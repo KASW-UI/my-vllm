@@ -109,8 +109,7 @@ def test_scheduler_schedules_with_enough_blocks():
     assert len(new.scheduled_new_reqs) == 2  # max_running=2
     assert new.scheduled_new_reqs[0].req_id == "A"
     assert new.scheduled_new_reqs[1].req_id == "B"
-    assert list(pool._free_ids) == [5, 6, 7, 8, 9, 10, 11, 12, 13, 14,
-                                    15, 16, 17, 18, 19]  # 15 free
+    assert pool.num_free == 15  # 20 - 2 - 3 = 15
     print("Scheduler schedules with enough blocks")
 
 

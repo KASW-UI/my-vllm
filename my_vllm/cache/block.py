@@ -1,7 +1,1 @@
-from dataclasses import dataclass
-
-
-@dataclass
-class KVCacheBlock:
-    block_id: int
-    is_free: bool = True
+from my_vllm.v1.core.kv_cache_utils import KVCacheBlock  # noqa: F401
