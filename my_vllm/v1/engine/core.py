@@ -4,17 +4,17 @@ from my_vllm.cache.block_pool import BlockPool
 from my_vllm.cache.kv_cache_manager import KVCacheManager
 from my_vllm.v1.core.sched.output import SchedulerOutput
 from my_vllm.v1.core.sched.scheduler import Scheduler
-from my_vllm.executor.uniproc_executor import Executor
+from my_vllm.v1.executor.abstract import Executor
 from my_vllm.v1.request import Request, RequestStatus
 
 
 class EngineCore:
     """Core execution loop — mirrors vLLM V1 v1/engine/core.py:EngineCore.
 
-    C016: uses Scheduler from v1/core/sched/ with structured SchedulerOutput.
-    schedule() returns SchedulerOutput (new_reqs + cached_reqs) instead of
-    plain list[Request].  Internal execution model remains per-request loops
-    with HF past_key_values.
+    C017: EngineCore calls executor.execute_model(scheduler_output) once
+    per step instead of iterating per-request.  Batch prefill replaces
+    individual _prefill calls.  Decode is still per-request internally
+    (HF past_key_values limitation) but encapsulated in GPUModelRunner.
     """
 
     def __init__(
@@ -52,65 +52,43 @@ class EngineCore:
         newly_finished: list[Request] = []
 
         scheduler_output = self.scheduler.schedule()
-        new_req_ids = {d.req_id for d in scheduler_output.scheduled_new_reqs}
+        if scheduler_output.total_num_scheduled_tokens == 0:
+            return newly_finished
 
-        for req in self.scheduler.running:
-            if req.request_id in new_req_ids:
-                self._prefill(req)
-            self._decode_step(req)
+        model_output = self.executor.execute_model(scheduler_output)
+        if model_output is None:
+            return newly_finished
+
+        req_map = {r.request_id: r for r in self.scheduler.running}
+
+        for rid, token_ids in model_output.sampled_token_ids.items():
+            req = req_map.get(rid)
+            if req is None:
+                continue
+            for token in token_ids:
+                if token == self.eos_token_id:
+                    req.status = RequestStatus.FINISHED_STOPPED
+                    self._finish_request(req)
+                    newly_finished.append(req)
+                    break
+                req.append_output_token_ids(token)
 
         for req in list(self.scheduler.running):
             rid = req.request_id
+            if req.is_finished():
+                continue
             step_val = self.worker.get_step(rid)
             limit = req.max_tokens or self.max_new_tokens
             if step_val >= limit:
                 req.status = RequestStatus.FINISHED_LENGTH_CAPPED
-                self.kv_cache_manager.free(rid)
-                self.worker.cleanup(rid)
-                self.scheduler.finish(req)
-                self.finished.append(req)
+                self._finish_request(req)
                 newly_finished.append(req)
 
         return newly_finished
 
-    def _prefill(self, req: Request):
+    def _finish_request(self, req: Request):
         rid = req.request_id
-        cache = self.kv_cache_manager.get_cache(rid)
-        if cache is None:
-            req.status = RequestStatus.WAITING
-            self.scheduler.finish(req)
-            self.scheduler.waiting.prepend_request(req)
-            return
-
-        input_ids = torch.tensor(
-            [req.prompt_token_ids], device=self.device
-        )
-        first = self.worker.execute_prefill(rid, input_ids, cache)
-
-        if first == self.eos_token_id:
-            req.status = RequestStatus.FINISHED_STOPPED
-            self.kv_cache_manager.free(rid)
-            self.worker.cleanup(rid)
-            self.scheduler.finish(req)
-            self.finished.append(req)
-            return
-
-        req.append_output_token_ids(first)
-
-    def _decode_step(self, req: Request):
-        rid = req.request_id
-        cache = self.kv_cache_manager.get_cache(rid)
-        if cache is None:
-            return
-
-        next_token = self.worker.execute_decode(rid, cache)
-
-        if next_token == self.eos_token_id:
-            req.status = RequestStatus.FINISHED_STOPPED
-            self.kv_cache_manager.free(rid)
-            self.worker.cleanup(rid)
-            self.scheduler.finish(req)
-            self.finished.append(req)
-            return
-
-        req.append_output_token_ids(next_token)
+        self.kv_cache_manager.free(rid)
+        self.worker.cleanup(rid)
+        self.scheduler.finish(req)
+        self.finished.append(req)

@@ -486,41 +486,41 @@ class BlockTable:
 │  1. scheduler_output = scheduler.schedule()                      │
 │     ┌──────────────────────────────────────────────────────────┐ │
 │     │ Scheduler.schedule():                                    │ │
-│     │   ├─ 遍历 running requests，计算 num_new_tokens           │ │
-│     │   ├─ kv_cache_manager.allocate_slots() — 含 prefix cache  │ │
+│     │   ├─ 遍历 running requests，计算 num_new_tokens            │ │
+│     │   ├─ kv_cache_manager.allocate_slots() — 含 prefix cache │ │
 │     │   ├─ 遍历 waiting queue (RequestQueue)，尝试分配 block     │ │
-│     │   ├─ 分配失败 → preempt 低优先级 running request          │ │
-│     │   └─ 构建 SchedulerOutput:                               │ │
-│     │       ├─ scheduled_new_reqs: list[NewRequestData]         │ │
-│     │       ├─ scheduled_cached_reqs: CachedRequestData         │ │
-│     │       ├─ finished_req_ids, new_block_ids_to_zero          │ │
-│     │       └─ num_scheduled_tokens: {prefill: N, decode: M}    │ │
+│     │   ├─ 分配失败 → preempt 低优先级 running request            │ │
+│     │   └─ 构建 SchedulerOutput:                                │ │
+│     │       ├─ scheduled_new_reqs: list[NewRequestData]        │ │
+│     │       ├─ scheduled_cached_reqs: CachedRequestData        │ │
+│     │       ├─ finished_req_ids, new_block_ids_to_zero         │ │
+│     │       └─ num_scheduled_tokens: {prefill: N, decode: M}   │ │
 │     └──────────────────────────────────────────────────────────┘ │
 │                                                                  │
 │  2. model_output = executor.execute_model(scheduler_output)      │
 │     ┌──────────────────────────────────────────────────────────┐ │
 │     │ Worker.execute_model(scheduler_output):                  │ │
 │     │   ├─ GPUModelRunner._prepare_inputs(scheduler_output):   │ │
-│     │   │   ├─ RequestState.add_request() — 新请求入 slot       │ │
+│     │   │   ├─ RequestState.add_request() — 新请求入 slot        │ │
 │     │   │   ├─ BlockTables.append_block_ids() — 更新 block table│ │
 │     │   │   ├─ 构造 InputBatch (input_ids, positions,           │ │
-│     │   │   │   query_start_loc, seq_lens, slot_mapping...)     │ │
+│     │   │   │   query_start_loc, seq_lens, slot_mapping...)    │ │
 │     │   │   └─ 构造 CommonAttentionMetadata                     │ │
 │     │   ├─ Model forward:                                      │ │
-│     │   │   └─ 每层: AttentionImpl.forward()                   │ │
-│     │   │       ├─ PagedAttention(query, key, value,            │ │
+│     │   │   └─ 每层: AttentionImpl.forward()                    │ │
+│     │   │       ├─ PagedAttention(query, key, value,           │ │
 │     │   │       │   block_table, kv_cache) → output            │ │
-│     │   │       └─ reshape_and_cache(K, V, kv_cache,            │ │
+│     │   │       └─ reshape_and_cache(K, V, kv_cache,           │ │
 │     │   │           slot_mapping)                              │ │
-│     │   └─ Sampler.forward(logits) → SamplerOutput              │ │
+│     │   └─ Sampler.forward(logits) → SamplerOutput             │ │
 │     └──────────────────────────────────────────────────────────┘ │
 │                                                                  │
-│  3. engine_core_outputs =                                       │
-│       scheduler.update_from_output(scheduler_output, model_output)│
+│  3. engine_core_outputs =                                        │
+│      scheduler.update_from_output(scheduler_output, model_output)│
 │     ┌──────────────────────────────────────────────────────────┐ │
 │     │ ├─ 提取 sampled_token_ids, logprobs                       │ │
 │     │ ├─ 更新每个 request: num_computed_tokens += num_new_tokens │ │
-│     │ ├─ 检查 stop 条件 (EOS / max_tokens)                      │ │
+│     │ ├─ 检查 stop 条件 (EOS / max_tokens)                       │ │
 │     │ ├─ 释放 finished request 的 KV blocks (KVCacheManager.free)│ │
 │     │ └─ 构建 dict[int, EngineCoreOutputs]                      │ │
 │     └──────────────────────────────────────────────────────────┘ │
