@@ -6,12 +6,19 @@ from my_vllm.cache.kv_cache import KVCache
 
 
 class WorkerBase(ABC):
-    """Abstract worker interface (C012).
+    """Abstract worker interface (C013).
 
-    External code interacts with the worker only through
-    execute_prefill / execute_decode — never through
-    ModelRunner directly.
+    C013: adds rank / world_size for Tensor Parallel support.
+    When world_size=1, the worker runs in single-card mode.
     """
+
+    def __init__(
+        self,
+        rank: int = 0,
+        world_size: int = 1,
+    ):
+        self.rank = rank
+        self.world_size = world_size
 
     @abstractmethod
     def init_device(self):

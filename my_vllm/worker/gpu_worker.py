@@ -4,14 +4,15 @@ import torch.nn as nn
 from my_vllm.worker.worker_base import WorkerBase
 from my_vllm.worker.model_runner import ModelRunner
 from my_vllm.cache.kv_cache import KVCache
+from my_vllm.distributed.parallel_state import init_distributed
 
 
 class Worker(WorkerBase):
-    """GPU Worker — owns model and ModelRunner (C012).
+    """GPU Worker — owns model and ModelRunner (C013).
 
-    Encapsulates all GPU execution.  StateManager calls
-    execute_prefill / execute_decode — never reaches
-    ModelRunner directly.
+    C013: accepts rank / world_size for Tensor Parallel.
+    When world_size=1, init_distributed is a no-op and TP
+    layers degrade to regular nn.Linear.
     """
 
     def __init__(
@@ -19,13 +20,19 @@ class Worker(WorkerBase):
         model: nn.Module,
         device: torch.device,
         eos_token_id: int = 2,
+        rank: int = 0,
+        world_size: int = 1,
     ):
+        super().__init__(rank=rank, world_size=world_size)
         self.model = model
         self.device = device
         self.eos_token_id = eos_token_id
         self._model_runner: ModelRunner | None = None
 
     def init_device(self):
+        init_distributed(
+            world_size=self.world_size, rank=self.rank
+        )
         self.model.eval()
         self._model_runner = ModelRunner(
             self.model, self.device, eos_token_id=self.eos_token_id
