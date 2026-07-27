@@ -1,23 +1,22 @@
 import torch
-import torch.nn as nn
 
 from my_vllm.cache.block_pool import BlockPool
 from my_vllm.cache.kv_cache_manager import KVCacheManager
 from my_vllm.engine.request import Request, RequestStatus
 from my_vllm.scheduler.scheduler import Scheduler
-from my_vllm.worker.model_runner import ModelRunner
+from my_vllm.worker.worker_base import WorkerBase
 
 
 class StateManager:
-    """Execution engine: Scheduler → ModelRunner → KVCacheManager.
+    """Execution engine: Scheduler → Worker → KVCacheManager.
 
-    C010: ModelRunner extracted — StateManager no longer touches
-    model forward or sampling directly.
+    C011: accesses ModelRunner through Worker instead of
+    holding model directly.
     """
 
     def __init__(
         self,
-        model: nn.Module,
+        worker: WorkerBase,
         device: torch.device,
         max_new_tokens: int = 50,
         eos_token_id: int = 2,
@@ -29,11 +28,12 @@ class StateManager:
         self.eos_token_id = eos_token_id
         self.device = device
 
+        worker.init_device()
+        self.worker = worker
+        self.runner = worker.get_model_runner()
+
         block_pool = BlockPool(num_kv_blocks, block_size)
         self.kv_cache_manager = KVCacheManager(block_pool=block_pool)
-        self.runner = ModelRunner(
-            model, device, eos_token_id=eos_token_id
-        )
         self.scheduler = Scheduler(
             max_running=max_running,
             kv_cache_manager=self.kv_cache_manager,

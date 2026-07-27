@@ -65,13 +65,15 @@ def test_scheduler_full_e2e():
     from my_vllm.runtime.tokenizer import load_tokenizer
     from my_vllm.runtime.model_loader import load_model
     from my_vllm.engine.state_manager import StateManager
+    from my_vllm.worker.gpu_worker import Worker
 
     model_name = "/home/kasw/文档/GitHub/cpu-vllm/opt-125m"
     tokenizer = load_tokenizer(model_name)
     hf_model = load_model(model_name)
 
     sm = StateManager(
-        hf_model, hf_model.device, max_new_tokens=10, max_running=2
+        Worker(hf_model, hf_model.device), hf_model.device,
+        max_new_tokens=10, max_running=2
     )
 
     prompts = ["Hello world", "Machine learning is", "The quick brown"]

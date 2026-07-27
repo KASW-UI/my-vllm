@@ -2,6 +2,7 @@ from my_vllm.runtime.tokenizer import load_tokenizer
 from my_vllm.runtime.model_loader import load_model
 from my_vllm.engine.request import Request, RequestStatus
 from my_vllm.engine.state_manager import StateManager
+from my_vllm.worker.gpu_worker import Worker
 
 
 def test_dynamic_lifecycle():
@@ -17,7 +18,8 @@ def test_dynamic_lifecycle():
     hf_model = load_model(model_name)
 
     sm = StateManager(
-        hf_model, hf_model.device, max_new_tokens=max_new_tokens
+        Worker(hf_model, hf_model.device), hf_model.device,
+        max_new_tokens=max_new_tokens
     )
 
     # Add requests — all start WAITING
@@ -52,7 +54,8 @@ def test_partial_join():
     hf_model = load_model(model_name)
 
     sm = StateManager(
-        hf_model, hf_model.device, max_new_tokens=10, max_running=2
+        Worker(hf_model, hf_model.device), hf_model.device,
+        max_new_tokens=10, max_running=2
     )
 
     req_a = Request(request_id="A")

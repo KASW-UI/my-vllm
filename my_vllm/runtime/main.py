@@ -2,6 +2,7 @@ from .tokenizer import load_tokenizer
 from .model_loader import load_model
 from my_vllm.engine.request import Request
 from my_vllm.engine.state_manager import StateManager
+from my_vllm.worker.gpu_worker import Worker
 
 
 def run(
@@ -20,8 +21,9 @@ def run(
     tokenizer = load_tokenizer(model_name)
     hf_model = load_model(model_name)
 
+    worker = Worker(hf_model, hf_model.device)
     sm = StateManager(
-        hf_model, hf_model.device, max_new_tokens=max_new_tokens
+        worker, hf_model.device, max_new_tokens=max_new_tokens
     )
 
     for i, prompt in enumerate(prompts):
