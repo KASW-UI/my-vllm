@@ -38,9 +38,11 @@ class KVCacheBlock:
         self._block_hash = block_hash
         self._block_hash_num_tokens = num_tokens
 
-    def reset_hash(self):
+    def reset_hash(self) -> bytes | None:
+        old = self._block_hash
         self._block_hash = None
         self._block_hash_num_tokens = None
+        return old
 
     @property
     def is_free(self) -> bool:

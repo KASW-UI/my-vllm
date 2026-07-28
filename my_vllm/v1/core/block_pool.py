@@ -51,7 +51,10 @@ class BlockPool:
         for b in blocks:
             b.ref_cnt = 0
             b._is_free = True
-            b.reset_hash()
+            # C029: remove from prefix cache when freeing
+            h = b.reset_hash()
+            if h and h in self.cached_block_hash_to_block:
+                del self.cached_block_hash_to_block[h]
             self.free_block_queue.append(b)
 
     def touch(self, blocks: list[KVCacheBlock]):
@@ -73,6 +76,7 @@ class BlockPool:
         """Register block hashes for prefix caching."""
         if not self.enable_caching:
             return
+        request.compute_block_hashes(self.block_size)
         for b, h in zip(blocks, request.block_hashes):
             if h:
                 b.set_block_hash(h)

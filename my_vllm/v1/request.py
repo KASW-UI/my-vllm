@@ -83,6 +83,30 @@ class Request:
         self.spec_token_ids: list[int] = []
         self.is_prefill_chunk: bool = False
 
+    def compute_block_hashes(self, block_size: int = 16) -> list[bytes]:
+        """Compute and cache hash for each block of prompt token IDs.
+
+        Each block's hash is derived from its token IDs.  Used by
+        KVCacheManager.get_computed_blocks() for prefix cache lookup.
+        Idempotent — only recomputes if block_hashes is empty.
+        """
+        if self.block_hashes:
+            return self.block_hashes
+        if not self.prompt_token_ids:
+            return []
+        tokens = self.prompt_token_ids
+        num_blocks = (len(tokens) + block_size - 1) // block_size
+        self.block_hashes = []
+        for i in range(num_blocks):
+            start = i * block_size
+            end = min(start + block_size, len(tokens))
+            block_tokens = tokens[start:end]
+            h = hash(tuple(block_tokens))
+            self.block_hashes.append(
+                h.to_bytes(8, "big", signed=True)
+            )
+        return self.block_hashes
+
     def append_output_token_ids(self, token_ids: int | list[int]) -> None:
         if isinstance(token_ids, int):
             self._output_token_ids.append(token_ids)

@@ -54,14 +54,19 @@ class KVCacheManager:
     def allocate_slots(
         self, request: Request, num_new_tokens: int
     ) -> KVCacheBlocks | None:
-        """Allocate blocks for num_new_tokens. Returns block IDs or None."""
-        num_blocks_needed = max(
+        """Allocate blocks for num_new_tokens. Returns block IDs or None.
+
+        C029: respects pre-existing blocks from get_computed_blocks()
+        (prefix cache hits).  Only allocates additional blocks beyond
+        the already-cached portion.
+        """
+        total_blocks_needed = max(
             1, (num_new_tokens + self.block_size - 1) // self.block_size
         )
 
         existing = self.request_blocks.get(request.request_id, [])
         current_blocks = len(existing)
-        new_blocks_needed = max(0, num_blocks_needed - current_blocks)
+        new_blocks_needed = max(0, total_blocks_needed - current_blocks)
 
         new_blocks: list[KVCacheBlock] = []
         if new_blocks_needed > 0:
@@ -75,6 +80,51 @@ class KVCacheManager:
         return KVCacheBlocks(
             block_ids=[b.block_id for b in all_blocks]
         )
+
+    def get_computed_blocks(
+        self, request: Request
+    ) -> tuple[KVCacheBlocks, int]:
+        """Find consecutive prefix cache hits for a request.
+
+        C029: walks request.block_hashes from the start,
+        checking BlockPool.get_cached_block() for each.
+        Returns cached blocks + number of already-computed tokens.
+
+        Args:
+            request: the request to check for prefix cache hits.
+
+        Returns:
+            (KVCacheBlocks, num_new_computed_tokens) where:
+            - KVCacheBlocks: cached blocks (may be empty)
+            - num_new_computed_tokens: tokens covered by cache hits
+        """
+        if not self.block_pool.enable_caching:
+            return KVCacheBlocks.empty(), 0
+
+        block_size = self.block_pool.block_size
+        request.compute_block_hashes(block_size)
+        cached_blocks: list[KVCacheBlock] = []
+        num_computed = 0
+
+        for block_hash in request.block_hashes:
+            if not block_hash:
+                break
+            cached = self.block_pool.get_cached_block(block_hash)
+            if cached is None:
+                break
+            cached_blocks.append(cached)
+            num_computed += min(
+                block_size,
+                len(request.prompt_token_ids) - num_computed,
+            )
+
+        if cached_blocks:
+            self.request_blocks[request.request_id] = cached_blocks
+            return KVCacheBlocks(
+                block_ids=[b.block_id for b in cached_blocks]
+            ), num_computed
+
+        return KVCacheBlocks.empty(), 0
 
     def get_block_ids(self, request_id: str) -> list[int]:
         bt = self.request_blocks.get(request_id, [])

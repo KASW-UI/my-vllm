@@ -3,7 +3,7 @@
 C016: migrated from scheduler/scheduler.py.
 Core change: schedule() now returns SchedulerOutput instead of list[Request].
 FCFSRequestQueue replaces plain list for waiting queue.
-Internal execution model unchanged (per-request, HF past_key_values).
+C029: prefix cache lookup via KVCacheManager.get_computed_blocks().
 """
 
 from my_vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -19,11 +19,7 @@ from my_vllm.v1.request import Request, RequestStatus
 class Scheduler:
     """FCFS scheduler with max batch size and KV cache awareness.
 
-    schedule() → SchedulerOutput gives structured scheduling metadata:
-      - scheduled_new_reqs: first-time scheduled requests (prefill candidates)
-      - scheduled_cached_reqs: already-running requests (decode candidates)
-      - num_scheduled_tokens: per-request token counts
-      - total_num_scheduled_tokens: total tokens in this step
+    C029: checks prefix cache before allocating new blocks.
     """
 
     def __init__(
@@ -43,17 +39,31 @@ class Scheduler:
     def schedule(self) -> SchedulerOutput:
         new_requests: list[Request] = []
         new_blocks: dict[str, list[int]] = {}
+        num_cached: dict[str, int] = {}
+
         while len(self.running) < self.max_running and self.waiting:
             req = self.waiting.pop_request()
 
             if self.kv_cache_manager is not None:
-                blocks = self.kv_cache_manager.allocate_slots(
-                    req, len(req.prompt_token_ids)
+                # C029: check prefix cache first
+                cached_blocks, num_computed = (
+                    self.kv_cache_manager.get_computed_blocks(req)
                 )
-                if blocks is None:
+                req.num_computed_tokens = num_computed
+
+                remaining = len(req.prompt_token_ids) - num_computed
+                if remaining > 0:
+                    blocks = self.kv_cache_manager.allocate_slots(
+                        req, len(req.prompt_token_ids)
+                    )
+                else:
+                    blocks = cached_blocks
+
+                if blocks is None or (remaining > 0 and len(blocks) == 0):
                     self.waiting.prepend_request(req)
                     break
                 new_blocks[req.request_id] = list(blocks.block_ids)
+                num_cached[req.request_id] = num_computed
 
             req.status = RequestStatus.RUNNING
             self.running.append(req)
@@ -64,6 +74,7 @@ class Scheduler:
                 req_id=r.request_id,
                 prompt_token_ids=r.prompt_token_ids,
                 block_ids=new_blocks.get(r.request_id, []),
+                num_computed_tokens=num_cached.get(r.request_id, 0),
             )
             for r in new_requests
         ]
@@ -93,6 +104,15 @@ class Scheduler:
 
     def finish(self, request: Request):
         if request in self.running:
+            # C029: cache the request's blocks for prefix reuse
+            if self.kv_cache_manager is not None:
+                blocks = self.kv_cache_manager.get_blocks(
+                    request.request_id
+                )
+                if blocks:
+                    self.kv_cache_manager.block_pool.cache_full_blocks(
+                        request, blocks
+                    )
             self.running.remove(request)
 
     def has_work(self) -> bool:

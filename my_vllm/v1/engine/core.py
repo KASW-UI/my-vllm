@@ -34,7 +34,7 @@ class EngineCore:
         self.executor = executor
         self.worker = executor.get_worker()
 
-        block_pool = BlockPool(num_kv_blocks, block_size)
+        block_pool = BlockPool(num_kv_blocks, block_size, enable_caching=True)
         self.kv_cache_manager = KVCacheManager(block_pool=block_pool)
         self.scheduler = Scheduler(
             max_running=max_running,
