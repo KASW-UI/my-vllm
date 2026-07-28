@@ -132,7 +132,14 @@ class GPUModelRunner:
         if not new_datas:
             return results
 
-        max_len = max(len(d.prompt_token_ids) for d in new_datas)
+        # C030: support chunked prefill — compute effective (uncached) prompt
+        # length per request based on num_computed_tokens
+        effective_lens = []
+        for d in new_datas:
+            start = d.num_computed_tokens
+            effective_lens.append(len(d.prompt_token_ids) - start)
+
+        max_len = max(effective_lens)
         batch_size = len(new_datas)
 
         input_ids = torch.zeros(
@@ -144,23 +151,31 @@ class GPUModelRunner:
 
         req_ids = []
         for i, d in enumerate(new_datas):
-            prompt = d.prompt_token_ids
-            plen = len(prompt)
-            input_ids[i, :plen] = torch.tensor(
-                prompt, dtype=torch.long, device=self.device,
+            start = d.num_computed_tokens
+            chunk = d.prompt_token_ids[start:]
+            clen = len(chunk)
+            input_ids[i, :clen] = torch.tensor(
+                chunk, dtype=torch.long, device=self.device,
             )
-            attention_mask[i, :plen] = 1
+            attention_mask[i, :clen] = 1
             req_ids.append(d.req_id)
 
-        positions = torch.arange(max_len, device=self.device).unsqueeze(0).expand(
-            batch_size, -1
-        ).long()
-        flat_pos = positions.flatten()[:max_len * batch_size]
+        positions_tensor = torch.zeros(
+            batch_size, max_len, dtype=torch.long, device=self.device,
+        )
+        for i, d in enumerate(new_datas):
+            start = d.num_computed_tokens
+            clen = effective_lens[i]
+            positions_tensor[i, :clen] = torch.arange(
+                start, start + clen, dtype=torch.long, device=self.device,
+            )
         query_start = torch.tensor(
-            [0] + [len(d.prompt_token_ids) for d in new_datas],
+            [0] + effective_lens,
             dtype=torch.long, device=self.device,
         ).cumsum(0)
         num_tokens = batch_size * max_len
+        flat_pos = positions_tensor.flatten()[:num_tokens]
+
         self.block_tables.compute_slot_mappings(query_start, flat_pos, num_tokens)
 
         self.attn_metadata = self._build_attn_metadata(
@@ -181,11 +196,11 @@ class GPUModelRunner:
         logits = outputs.logits
         past_kvs = outputs.past_key_values
 
-        self._write_prefill_to_cache(past_kvs, new_datas, batch_size)
+        self._write_prefill_to_cache(past_kvs, new_datas, batch_size, effective_lens)
 
-        # C024: use Sampler for batch sampling
+        # C024: use Sampler — logits at the last effective token position
         token_logits = torch.stack(
-            [logits[i, len(new_datas[i].prompt_token_ids) - 1, :]
+            [logits[i, effective_lens[i] - 1, :]
              for i in range(batch_size)]
         )  # [batch_size, vocab_size]
 
@@ -199,15 +214,17 @@ class GPUModelRunner:
 
     def _write_prefill_to_cache(
         self, past_key_values, new_datas: list, batch_size: int,
+        effective_lens: list[int] = None,
     ) -> None:
-        padded_len = max(len(d.prompt_token_ids) for d in new_datas)
+        if effective_lens is None:
+            effective_lens = [len(d.prompt_token_ids) for d in new_datas]
+        padded_len = max(effective_lens)
         total_tokens = batch_size * padded_len
         slot_map = self.block_tables.slot_mappings[:total_tokens]
 
         valid = torch.zeros(total_tokens, dtype=torch.bool, device=self.device)
         offset = 0
-        for d in new_datas:
-            plen = len(d.prompt_token_ids)
+        for plen in effective_lens:
             valid[offset:offset + plen] = True
             offset += padded_len
 

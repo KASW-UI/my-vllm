@@ -1,9 +1,9 @@
 """Scheduler component — mirrors vLLM V1 v1/core/sched/scheduler.py.
 
 C016: migrated from scheduler/scheduler.py.
-Core change: schedule() now returns SchedulerOutput instead of list[Request].
-FCFSRequestQueue replaces plain list for waiting queue.
 C029: prefix cache lookup via KVCacheManager.get_computed_blocks().
+C030: chunked prefill — long prompts split by token_budget;
+      num_computed_tokens tracks prefill progress per-chunk.
 """
 
 from my_vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -17,67 +17,105 @@ from my_vllm.v1.request import Request, RequestStatus
 
 
 class Scheduler:
-    """FCFS scheduler with max batch size and KV cache awareness.
+    """FCFS scheduler with chunked prefill (C030).
 
-    C029: checks prefix cache before allocating new blocks.
+    max_num_batched_tokens limits per-step prefill tokens.
+    Long prompts are split across multiple steps; after each
+    chunk the request remains running for decode interleaving.
     """
 
     def __init__(
         self,
         max_running: int = 8,
         kv_cache_manager: KVCacheManager | None = None,
+        max_num_batched_tokens: int = 2048,
     ):
         self.waiting = FCFSRequestQueue()
         self.running: list[Request] = []
         self.max_running = max_running
         self.kv_cache_manager = kv_cache_manager
+        self.max_num_batched_tokens = max_num_batched_tokens
 
     def add_request(self, request: Request):
         request.status = RequestStatus.WAITING
         self.waiting.add_request(request)
 
     def schedule(self) -> SchedulerOutput:
-        new_requests: list[Request] = []
+        token_budget = self.max_num_batched_tokens
+        new_req_datas: list[NewRequestData] = []
         new_blocks: dict[str, list[int]] = {}
-        num_cached: dict[str, int] = {}
 
-        while len(self.running) < self.max_running and self.waiting:
+        # C030: handle running requests that still need prefill (chunk continue)
+        for req in self.running:
+            if not req.is_prefill_chunk:
+                continue
+            remaining = len(req.prompt_token_ids) - req.num_computed_tokens
+            if remaining <= 0 or token_budget <= 0:
+                req.is_prefill_chunk = False
+                continue
+
+            chunk = min(remaining, token_budget)
+            token_budget -= chunk
+            req.num_computed_tokens += chunk
+            req.is_prefill_chunk = (
+                req.num_computed_tokens < len(req.prompt_token_ids)
+            )
+
+            # Allocate additional blocks if needed for the new tokens
+            if self.kv_cache_manager is not None:
+                blocks = self.kv_cache_manager.allocate_slots(
+                    req, req.num_computed_tokens
+                )
+                if blocks is None:
+                    req.num_computed_tokens -= chunk
+                    continue
+                new_blocks[req.request_id] = list(blocks.block_ids)
+
+            new_req_datas.append(NewRequestData(
+                req_id=req.request_id,
+                prompt_token_ids=req.prompt_token_ids,
+                block_ids=new_blocks.get(req.request_id, []),
+                num_computed_tokens=req.num_computed_tokens - chunk,
+            ))
+
+        # Pull new requests from waiting queue
+        while len(self.running) < self.max_running and self.waiting and token_budget > 0:
             req = self.waiting.pop_request()
+            prompt_len = len(req.prompt_token_ids)
+            num_cached = 0
 
             if self.kv_cache_manager is not None:
-                # C029: check prefix cache first
-                cached_blocks, num_computed = (
+                cached_blocks, num_cached = (
                     self.kv_cache_manager.get_computed_blocks(req)
                 )
-                req.num_computed_tokens = num_computed
+                req.num_computed_tokens = num_cached
 
-                remaining = len(req.prompt_token_ids) - num_computed
-                if remaining > 0:
-                    blocks = self.kv_cache_manager.allocate_slots(
-                        req, len(req.prompt_token_ids)
-                    )
-                else:
-                    blocks = cached_blocks
-
-                if blocks is None or (remaining > 0 and len(blocks) == 0):
+                blocks = self.kv_cache_manager.allocate_slots(
+                    req, prompt_len
+                )
+                if blocks is None:
                     self.waiting.prepend_request(req)
                     break
                 new_blocks[req.request_id] = list(blocks.block_ids)
-                num_cached[req.request_id] = num_computed
+
+            # C030: chunk if remaining > token_budget
+            remaining = prompt_len - num_cached
+            chunk = min(remaining, token_budget)
+            token_budget -= chunk
+            req.num_computed_tokens = num_cached + chunk
+            req.is_prefill_chunk = (
+                req.num_computed_tokens < prompt_len
+            )
 
             req.status = RequestStatus.RUNNING
             self.running.append(req)
-            new_requests.append(req)
 
-        new_req_data = [
-            NewRequestData(
-                req_id=r.request_id,
-                prompt_token_ids=r.prompt_token_ids,
-                block_ids=new_blocks.get(r.request_id, []),
-                num_computed_tokens=num_cached.get(r.request_id, 0),
-            )
-            for r in new_requests
-        ]
+            new_req_datas.append(NewRequestData(
+                req_id=req.request_id,
+                prompt_token_ids=req.prompt_token_ids,
+                block_ids=new_blocks.get(req.request_id, []),
+                num_computed_tokens=num_cached,
+            ))
 
         cached_data = CachedRequestData(
             req_ids=[r.request_id for r in self.running],
@@ -91,11 +129,13 @@ class Scheduler:
             },
         )
 
-        total_tokens = sum(len(r.prompt_token_ids) for r in new_requests)
+        total_tokens = sum(
+            len(d.prompt_token_ids) for d in new_req_datas
+        )
         total_tokens += len(self.running)
 
         return SchedulerOutput(
-            scheduled_new_reqs=new_req_data,
+            scheduled_new_reqs=new_req_datas,
             scheduled_cached_reqs=cached_data,
             num_scheduled_tokens={},
             total_num_scheduled_tokens=total_tokens,
@@ -104,7 +144,6 @@ class Scheduler:
 
     def finish(self, request: Request):
         if request in self.running:
-            # C029: cache the request's blocks for prefix reuse
             if self.kv_cache_manager is not None:
                 blocks = self.kv_cache_manager.get_blocks(
                     request.request_id
