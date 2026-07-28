@@ -1,12 +1,11 @@
 """OpenAI-compatible API server (stdlib, no external deps)."""
 
 import json
-import asyncio
 import uuid
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
 from my_vllm.engine.llm_engine import LLMEngine
-from my_vllm.server.async_llm import AsyncLLM
+from my_vllm.v1.engine.async_llm import AsyncLLM
 
 
 class CompletionHandler(BaseHTTPRequestHandler):
