@@ -1,10 +1,12 @@
 """Public API — the main entry point for external users.
 
 C015: migrated from engine/llm_engine.py.
-Uses EngineCore (v1/engine/core.py) instead of StateManager.
+C025: uses OutputProcessor for token→text; receives structured
+RequestOutput from EngineCore.step().
 """
 
 from my_vllm.v1.engine.core import EngineCore
+from my_vllm.v1.engine.output_processor import RequestOutput
 from my_vllm.v1.request import Request
 
 
@@ -39,18 +41,24 @@ class LLMEngine:
     def step(self) -> list[dict]:
         """Run one scheduling + execution step and return finished outputs."""
         results: list[dict] = []
-        finished = self._engine_core.step()
-        for req in finished:
-            text = self._tokenizer.decode(req.output_token_ids)
-            prompt = self._tokenizer.decode(req.prompt_token_ids)
+        outputs: list[RequestOutput] = self._engine_core.step()
+        for out in outputs:
+            prompt_text = out.prompt_text
+            if not prompt_text and out.request_id in self._pending:
+                req = self._pending[out.request_id]
+                prompt_text = self._tokenizer.decode(req.prompt_token_ids)
             results.append({
-                "request_id": req.request_id,
-                "text": prompt + text,
-                "finish_reason": req.status.name,
-                "output_tokens": req.num_output_tokens,
-                "prompt_tokens": len(req.prompt_token_ids),
+                "request_id": out.request_id,
+                "text": prompt_text + out.output_text,
+                "prompt_text": prompt_text,
+                "output_text": out.output_text,
+                "delta_text": out.delta_text,
+                "finish_reason": out.finish_reason,
+                "output_tokens": out.output_tokens,
+                "prompt_tokens": out.prompt_tokens,
             })
-            self._pending.pop(req.request_id, None)
+            if out.finished:
+                self._pending.pop(out.request_id, None)
         return results
 
     def has_work(self) -> bool:

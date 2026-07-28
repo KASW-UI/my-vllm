@@ -3,6 +3,7 @@ import torch
 from my_vllm.v1.core.block_pool import BlockPool
 from my_vllm.v1.core.kv_cache_manager import KVCacheManager
 from my_vllm.v1.core.sched.scheduler import Scheduler
+from my_vllm.v1.engine.output_processor import OutputProcessor, RequestOutput
 from my_vllm.v1.executor.abstract import Executor
 from my_vllm.v1.request import Request, RequestStatus
 
@@ -10,10 +11,9 @@ from my_vllm.v1.request import Request, RequestStatus
 class EngineCore:
     """Core execution loop — mirrors vLLM V1 v1/engine/core.py:EngineCore.
 
-    C017: EngineCore calls executor.execute_model(scheduler_output) once
-    per step instead of iterating per-request.  Batch prefill replaces
-    individual _prefill calls.  Decode is still per-request internally
-    (HF past_key_values limitation) but encapsulated in GPUModelRunner.
+    C017: batch prefill via executor.execute_model().
+    C025: output processing delegated to OutputProcessor; LLMEngine
+    receives structured RequestOutput instead of raw Request objects.
     """
 
     def __init__(
@@ -25,6 +25,7 @@ class EngineCore:
         max_running: int = 8,
         num_kv_blocks: int = 512,
         block_size: int = 16,
+        tokenizer=None,
     ):
         self.max_new_tokens = max_new_tokens
         self.eos_token_id = eos_token_id
@@ -41,53 +42,45 @@ class EngineCore:
         )
         self.finished: list[Request] = []
 
+        # C025: OutputProcessor with detokenizer
+        self.output_processor = OutputProcessor(tokenizer)
+
     def add_request(self, request: Request):
         self.scheduler.add_request(request)
 
     def has_work(self) -> bool:
         return self.scheduler.has_work()
 
-    def step(self) -> list[Request]:
-        newly_finished: list[Request] = []
-
+    def step(self) -> list[RequestOutput]:
+        """Run one scheduling + execution step, return finished outputs."""
         scheduler_output = self.scheduler.schedule()
         if scheduler_output.total_num_scheduled_tokens == 0:
-            return newly_finished
+            return []
 
         model_output = self.executor.execute_model(scheduler_output)
         if model_output is None:
-            return newly_finished
+            return []
 
         req_map = {r.request_id: r for r in self.scheduler.running}
 
-        for rid, token_ids in model_output.sampled_token_ids.items():
-            req = req_map.get(rid)
-            if req is None:
-                continue
-            for token in token_ids:
-                if token == self.eos_token_id:
-                    req.status = RequestStatus.FINISHED_STOPPED
-                    self._finish_request(req)
-                    newly_finished.append(req)
-                    break
-                req.append_output_token_ids(token)
+        # C025: delegate to OutputProcessor
+        outputs = self.output_processor.process_outputs(
+            model_output, req_map,
+            eos_token_id=self.eos_token_id,
+            max_tokens=self.max_new_tokens,
+        )
 
         for req in list(self.scheduler.running):
-            rid = req.request_id
-            if req.is_finished():
-                continue
-            step_val = self.worker.get_step(rid)
-            limit = req.max_tokens or self.max_new_tokens
-            if step_val >= limit:
-                req.status = RequestStatus.FINISHED_LENGTH_CAPPED
+            if req.is_finished() and req not in self.finished:
                 self._finish_request(req)
-                newly_finished.append(req)
 
-        return newly_finished
+        # Return only newly finished outputs (backward compat)
+        return [o for o in outputs if o.finished]
 
     def _finish_request(self, req: Request):
         rid = req.request_id
         self.kv_cache_manager.free(rid)
         self.worker.cleanup(rid)
         self.scheduler.finish(req)
+        self.output_processor.cleanup(rid)
         self.finished.append(req)
