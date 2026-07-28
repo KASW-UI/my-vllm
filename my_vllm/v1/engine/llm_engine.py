@@ -3,9 +3,11 @@
 C015: migrated from engine/llm_engine.py.
 C025: uses OutputProcessor for token→text; receives structured
 RequestOutput from EngineCore.step().
+C026: InputProcessor handles prompt → tokenize → Request.
 """
 
 from my_vllm.v1.engine.core import EngineCore
+from my_vllm.v1.engine.input_processor import InputProcessor
 from my_vllm.v1.engine.output_processor import RequestOutput
 from my_vllm.v1.request import Request
 
@@ -25,15 +27,18 @@ class LLMEngine:
         self._tokenizer = tokenizer
         self._pending: dict[str, Request] = {}
 
+        # C026: InputProcessor for prompt → Request conversion
+        self._input_processor = InputProcessor(
+            tokenizer,
+            default_max_tokens=engine_core.max_new_tokens,
+        )
+
     def add_request(
         self,
         prompt: str,
         max_new_tokens: int | None = None,
     ) -> str:
-        max_tok = max_new_tokens or self._engine_core.max_new_tokens
-        req = Request(request_id=f"req-{len(self._pending)}")
-        req.prompt_token_ids = self._tokenizer.encode(prompt)
-        req.max_tokens = max_tok
+        req = self._input_processor.process(prompt, max_new_tokens)
         self._pending[req.request_id] = req
         self._engine_core.add_request(req)
         return req.request_id
