@@ -4,18 +4,11 @@ Mirrors vLLM V1 v1/worker/gpu_model_runner.py core structure.
 
 C017: replaces per-request prefill/decode with batched prefill
 and centralized decode.
-
 C019: adds BlockTables GPU tensor management.
-
 C020: RequestState replaces Python dicts for per-request state.
-
-C022: builds CommonAttentionMetadata from InputBatch +
-BlockTables fields.
-
+C022: builds CommonAttentionMetadata from InputBatch + BlockTables.
 C023: physical KV cache pool replaces HF past_key_values.
-PagedAttention ops (reshape_and_cache + gather_cached_kv)
-manage KV in blocked GPU memory.  Decode reconstructs
-past_key_values from physical cache before model forward.
+C024: Sampler (nn.Module) replaces greedy_sample() function.
 """
 
 import torch
@@ -31,6 +24,8 @@ from my_vllm.v1.attention.backends.ops.paged_attn import (
 )
 from my_vllm.v1.core.sched.output import SchedulerOutput
 from my_vllm.v1.outputs import ModelRunnerOutput
+from my_vllm.v1.sample.metadata import SamplingMetadata
+from my_vllm.v1.sample.sampler import Sampler
 from my_vllm.v1.worker.gpu.block_table import BlockTables
 from my_vllm.v1.worker.gpu.states import RequestState
 
@@ -66,8 +61,10 @@ class GPUModelRunner:
         self.head_dim = head_dim
         self.dtype = dtype
 
+        # C024: Sampler (nn.Module) — replaces greedy_sample()
+        self.sampler = Sampler()
+
         # C023: physical KV cache pool
-        # K cache: [num_layers, num_blocks, num_kv_heads, block_size, head_dim]
         self.kv_cache_k = torch.zeros(
             num_layers, max_num_blocks, num_kv_heads, block_size, head_dim,
             dtype=dtype, device=device,
@@ -99,7 +96,6 @@ class GPUModelRunner:
     ) -> ModelRunnerOutput:
         sampled_tokens: dict[str, list[int]] = {}
 
-        # Register new requests + their blocks
         prefill_datas = []
         for d in scheduler_output.scheduled_new_reqs:
             if d.req_id not in self.request_state.req_id_to_index:
@@ -108,19 +104,16 @@ class GPUModelRunner:
             self.block_tables.append_block_ids(idx, d.block_ids)
             prefill_datas.append(d)
 
-        # Append new blocks for running requests (crossing block boundary)
         for rid, new_bids in scheduler_output.scheduled_cached_reqs.new_block_ids.items():
             idx = self.request_state.get_index(rid)
             self.block_tables.append_block_ids(idx, new_bids)
 
-        # 1. Batch prefill
         if prefill_datas:
             prefill_results = self._prefill_batch(prefill_datas)
             for rid, token in prefill_results.items():
                 self.request_state.set_last_sampled_token(rid, token)
                 sampled_tokens.setdefault(rid, []).append(token)
 
-        # 2. Batch decode — C023: physical KV cache
         decode_req_ids = scheduler_output.scheduled_cached_reqs.req_ids
         if decode_req_ids:
             decode_results = self._decode_batch(decode_req_ids)
@@ -143,13 +136,10 @@ class GPUModelRunner:
         batch_size = len(new_datas)
 
         input_ids = torch.zeros(
-            batch_size, max_len, dtype=torch.long, device=self.device
+            batch_size, max_len, dtype=torch.long, device=self.device,
         )
         attention_mask = torch.zeros(
-            batch_size, max_len, dtype=torch.long, device=self.device
-        )
-        positions = torch.zeros(
-            batch_size, max_len, dtype=torch.long, device=self.device
+            batch_size, max_len, dtype=torch.long, device=self.device,
         )
 
         req_ids = []
@@ -157,28 +147,26 @@ class GPUModelRunner:
             prompt = d.prompt_token_ids
             plen = len(prompt)
             input_ids[i, :plen] = torch.tensor(
-                prompt, dtype=torch.long, device=self.device
+                prompt, dtype=torch.long, device=self.device,
             )
             attention_mask[i, :plen] = 1
-            positions[i, :plen] = torch.arange(
-                plen, dtype=torch.long, device=self.device
-            )
             req_ids.append(d.req_id)
 
+        positions = torch.arange(max_len, device=self.device).unsqueeze(0).expand(
+            batch_size, -1
+        ).long()
+        flat_pos = positions.flatten()[:max_len * batch_size]
         query_start = torch.tensor(
             [0] + [len(d.prompt_token_ids) for d in new_datas],
             dtype=torch.long, device=self.device,
         ).cumsum(0)
-        flat_positions = positions.flatten()[:max_len * batch_size]
         num_tokens = batch_size * max_len
-        self.block_tables.compute_slot_mappings(
-            query_start, flat_positions, num_tokens
-        )
+        self.block_tables.compute_slot_mappings(query_start, flat_pos, num_tokens)
 
         self.attn_metadata = self._build_attn_metadata(
             num_reqs=batch_size,
             query_start_loc=query_start,
-            positions=flat_positions,
+            positions=flat_pos,
             num_tokens=num_tokens,
             max_query_len=max_len,
         )
@@ -193,14 +181,19 @@ class GPUModelRunner:
         logits = outputs.logits
         past_kvs = outputs.past_key_values
 
-        # C023: write prefill KV into physical cache
         self._write_prefill_to_cache(past_kvs, new_datas, batch_size)
 
+        # C024: use Sampler for batch sampling
+        token_logits = torch.stack(
+            [logits[i, len(new_datas[i].prompt_token_ids) - 1, :]
+             for i in range(batch_size)]
+        )  # [batch_size, vocab_size]
+
+        sampling_meta = SamplingMetadata(all_greedy=True)
+        sampled = self.sampler(token_logits, sampling_meta)
+
         for i, rid in enumerate(req_ids):
-            prompt_len = len(new_datas[i].prompt_token_ids)
-            token_logits = logits[i, prompt_len - 1, :]
-            token = torch.argmax(token_logits).item()
-            results[rid] = token
+            results[rid] = int(sampled[i].item())
 
         return results
 
@@ -211,7 +204,6 @@ class GPUModelRunner:
         total_tokens = batch_size * padded_len
         slot_map = self.block_tables.slot_mappings[:total_tokens]
 
-        # Build valid mask: only non-padding positions
         valid = torch.zeros(total_tokens, dtype=torch.bool, device=self.device)
         offset = 0
         for d in new_datas:
@@ -222,10 +214,10 @@ class GPUModelRunner:
         for layer_idx, (layer_k, layer_v) in enumerate(past_key_values):
             bsz, nheads, _, hdim = layer_k.shape
             k_flat = layer_k.permute(0, 2, 1, 3).reshape(
-                bsz * padded_len, nheads, hdim
+                bsz * padded_len, nheads, hdim,
             )
             v_flat = layer_v.permute(0, 2, 1, 3).reshape(
-                bsz * padded_len, nheads, hdim
+                bsz * padded_len, nheads, hdim,
             )
             reshape_and_cache_pytorch(
                 k_flat[valid], v_flat[valid],
@@ -263,16 +255,13 @@ class GPUModelRunner:
             dtype=torch.int32, device=self.device,
         )
 
-        # Reconstruct past_key_values from physical KV cache
         block_table = self.block_tables.block_table[:num_reqs]
         past_key_values = []
         for layer_idx in range(self.num_layers):
             keys, values = gather_cached_kv_pytorch(
                 self.kv_cache_k[layer_idx],
                 self.kv_cache_v[layer_idx],
-                block_table,
-                seq_lens,
-                self.block_size,
+                block_table, seq_lens, self.block_size,
             )
             past_key_values.append((keys, values))
         past_key_values = tuple(past_key_values)
@@ -288,10 +277,15 @@ class GPUModelRunner:
                 use_cache=True,
             )
 
-        logits = outputs.logits
+        logits_all = outputs.logits  # [batch, 1, vocab]
         new_past_kvs = outputs.past_key_values
 
-        # Write new decode K/V to physical cache and sample
+        # C024: batch sample using Sampler
+        logits_flat = logits_all[:, -1, :]  # [num_reqs, vocab_size]
+        sampling_meta = SamplingMetadata(all_greedy=True)
+        sampled = self.sampler(logits_flat, sampling_meta)
+
+        # Write new decode K/V to physical cache
         for i, rid in enumerate(valid_reqs):
             idx = self.request_state.get_index(rid)
             old_seq_len = int(self.request_state.num_computed_tokens_cpu[idx])
@@ -302,14 +296,12 @@ class GPUModelRunner:
             )
 
             for layer_idx, (layer_k, layer_v) in enumerate(new_past_kvs):
-                # layer_k: [batch, num_heads, old_seq_len+1, head_dim]
-                k_new = layer_k[i, :, old_seq_len, :]  # [num_heads, head_dim]
+                k_new = layer_k[i, :, old_seq_len, :]
                 v_new = layer_v[i, :, old_seq_len, :]
                 self.kv_cache_k[layer_idx, block_id, :, block_offset, :] = k_new
                 self.kv_cache_v[layer_idx, block_id, :, block_offset, :] = v_new
 
-            token_logits = logits[i, -1, :]
-            next_token = int(torch.argmax(token_logits).item())
+            next_token = int(sampled[i].item())
             self.request_state.set_last_sampled_token(rid, next_token)
 
             if next_token == self.eos_token_id:

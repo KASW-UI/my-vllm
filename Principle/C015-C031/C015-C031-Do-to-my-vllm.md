@@ -19,6 +19,11 @@
 ```
 /home/kasw/文档/GitHub/GPU-Project/vllm
 ```
+
+venv
+```
+/home/kasw/workspace/gpu-infra/.venv
+```
 ---
 
 # Role
