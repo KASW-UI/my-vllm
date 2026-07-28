@@ -1,9 +1,9 @@
 from .tokenizer import load_tokenizer
 from .model_loader import load_model
-from my_vllm.engine.request import Request
-from my_vllm.engine.state_manager import StateManager
-from my_vllm.worker.gpu_worker import Worker
-from my_vllm.executor.uniproc_executor import UniProcExecutor
+from my_vllm.v1.request import Request
+from my_vllm.v1.engine.core import EngineCore as StateManager
+from my_vllm.v1.worker.gpu_worker import Worker
+from my_vllm.v1.executor.uniproc_executor import UniProcExecutor
 
 
 def run(

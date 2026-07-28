@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 from my_vllm.generation.sampler import greedy_sample
-from my_vllm.engine.request import Request, RequestStatus
+from my_vllm.v1.request import Request, RequestStatus
 
 
 class BatchExecutor:

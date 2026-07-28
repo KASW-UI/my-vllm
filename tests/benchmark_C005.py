@@ -5,7 +5,7 @@ import time
 from my_vllm.runtime.tokenizer import load_tokenizer
 from my_vllm.runtime.model_loader import load_model
 from my_vllm.runtime.model import LLM
-from my_vllm.engine.request import Request
+from my_vllm.v1.request import Request
 
 MODEL = "/home/kasw/文档/GitHub/cpu-vllm/opt-125m"
 PROMPTS = [

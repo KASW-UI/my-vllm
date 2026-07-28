@@ -1,5 +1,5 @@
-from my_vllm.engine.request import Request, RequestStatus
-from my_vllm.scheduler.scheduler import Scheduler
+from my_vllm.v1.request import Request, RequestStatus
+from my_vllm.v1.core.sched.scheduler import Scheduler
 
 
 def test_scheduler_fcfs():
@@ -64,9 +64,9 @@ def test_scheduler_full_e2e():
     import torch
     from my_vllm.runtime.tokenizer import load_tokenizer
     from my_vllm.runtime.model_loader import load_model
-    from my_vllm.engine.state_manager import StateManager
-    from my_vllm.worker.gpu_worker import Worker
-    from my_vllm.executor.uniproc_executor import UniProcExecutor
+    from my_vllm.v1.engine.core import EngineCore as StateManager
+    from my_vllm.v1.worker.gpu_worker import Worker
+    from my_vllm.v1.executor.uniproc_executor import UniProcExecutor
 
     model_name = "/home/kasw/文档/GitHub/cpu-vllm/opt-125m"
     tokenizer = load_tokenizer(model_name)

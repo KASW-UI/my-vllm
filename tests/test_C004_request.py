@@ -1,4 +1,4 @@
-from my_vllm.engine.request import Request, RequestStatus
+from my_vllm.v1.request import Request, RequestStatus
 
 
 def test_request_lifecycle():
