@@ -8,7 +8,6 @@ preserved via direct model+device constructor.
 import torch
 import torch.nn as nn
 
-from my_vllm.cache.kv_cache import KVCache
 from my_vllm.distributed.parallel_state import init_distributed
 from my_vllm.v1.outputs import ModelRunnerOutput
 from my_vllm.v1.worker.worker_base import WorkerBase
@@ -89,15 +88,3 @@ class Worker(WorkerBase):
 
     def cleanup(self, request_id: str):
         self._runner().cleanup(request_id)
-
-    # Legacy bridge
-    def execute_prefill(
-        self, request_id: str,
-        input_ids: torch.Tensor, cache: KVCache
-    ) -> int:
-        return self._runner()._prefill_one(request_id, input_ids, cache)
-
-    def execute_decode(
-        self, request_id: str, cache: KVCache
-    ) -> int:
-        return self._runner()._decode_one_legacy(request_id, cache)

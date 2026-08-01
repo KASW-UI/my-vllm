@@ -52,7 +52,11 @@ class EngineCore:
         return self.scheduler.has_work()
 
     def step(self) -> list[RequestOutput]:
-        """Run one scheduling + execution step, return finished outputs."""
+        """Run one scheduling + execution step, return finished outputs.
+
+        C032: scheduler.update_from_output() handles finish detection;
+        EngineCore frees resources for finished requests.
+        """
         scheduler_output = self.scheduler.schedule()
         if scheduler_output.total_num_scheduled_tokens == 0:
             return []
@@ -60,6 +64,12 @@ class EngineCore:
         model_output = self.executor.execute_model(scheduler_output)
         if model_output is None:
             return []
+
+        engine_outputs = self.scheduler.update_from_output(
+            scheduler_output, model_output,
+            eos_token_id=self.eos_token_id,
+            max_tokens=self.max_new_tokens,
+        )
 
         req_map = {r.request_id: r for r in self.scheduler.running}
 
@@ -70,11 +80,10 @@ class EngineCore:
             max_tokens=self.max_new_tokens,
         )
 
-        for req in list(self.scheduler.running):
-            if req.is_finished() and req not in self.finished:
+        for req in engine_outputs.finished_requests:
+            if req not in self.finished:
                 self._finish_request(req)
 
-        # Return only newly finished outputs (backward compat)
         return [o for o in outputs if o.finished]
 
     def _finish_request(self, req: Request):

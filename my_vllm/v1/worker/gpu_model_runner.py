@@ -14,8 +14,6 @@ C024: Sampler (nn.Module) replaces greedy_sample() function.
 import torch
 import torch.nn as nn
 
-from my_vllm.cache.kv_cache import KVCache
-from my_vllm.generation.sampler import greedy_sample
 from my_vllm.v1.attention.metadata import CommonAttentionMetadata
 from my_vllm.v1.attention.selector import get_attn_backend
 from my_vllm.v1.attention.backends.ops.paged_attn import (
@@ -196,7 +194,7 @@ class GPUModelRunner:
         logits = outputs.logits
         past_kvs = outputs.past_key_values
 
-        self._write_prefill_to_cache(past_kvs, new_datas, batch_size, effective_lens)
+        self._write_kv_to_physical_cache(past_kvs, new_datas, batch_size, effective_lens)
 
         # C024: use Sampler — logits at the last effective token position
         token_logits = torch.stack(
@@ -212,10 +210,12 @@ class GPUModelRunner:
 
         return results
 
-    def _write_prefill_to_cache(
+    def _write_kv_to_physical_cache(
         self, past_key_values, new_datas: list, batch_size: int,
         effective_lens: list[int] = None,
     ) -> None:
+        """Write HF past_key_values into physical GPU KV cache via slot_mapping.
+        """
         if effective_lens is None:
             effective_lens = [len(d.prompt_token_ids) for d in new_datas]
         padded_len = max(effective_lens)
@@ -302,7 +302,8 @@ class GPUModelRunner:
         sampling_meta = SamplingMetadata(all_greedy=True)
         sampled = self.sampler(logits_flat, sampling_meta)
 
-        # Write new decode K/V to physical cache
+        # Write new decode K/V to physical cache via slot mapping
+        decode_slots = []
         for i, rid in enumerate(valid_reqs):
             idx = self.request_state.get_index(rid)
             old_seq_len = int(self.request_state.num_computed_tokens_cpu[idx])
@@ -311,13 +312,20 @@ class GPUModelRunner:
             block_id = int(
                 self.block_tables.block_table[idx, block_index].item()
             )
+            decode_slots.append(block_id * self.block_size + block_offset)
 
-            for layer_idx, (layer_k, layer_v) in enumerate(new_past_kvs):
-                k_new = layer_k[i, :, old_seq_len, :]
-                v_new = layer_v[i, :, old_seq_len, :]
-                self.kv_cache_k[layer_idx, block_id, :, block_offset, :] = k_new
-                self.kv_cache_v[layer_idx, block_id, :, block_offset, :] = v_new
+        slot_tensor = torch.tensor(decode_slots, dtype=torch.int64, device=self.device)
+        for layer_idx, (layer_k, layer_v) in enumerate(new_past_kvs):
+            k_last = layer_k[:, :, -1, :]  # [batch, nheads, hdim]
+            v_last = layer_v[:, :, -1, :]
+            reshape_and_cache_pytorch(
+                k_last, v_last,
+                self.kv_cache_k[layer_idx],
+                self.kv_cache_v[layer_idx],
+                slot_tensor,
+            )
 
+        for i, rid in enumerate(valid_reqs):
             next_token = int(sampled[i].item())
             self.request_state.set_last_sampled_token(rid, next_token)
 
@@ -355,32 +363,6 @@ class GPUModelRunner:
             slot_mapping=self.block_tables.slot_mappings[:num_tokens],
             positions=positions,
         )
-
-    # --- legacy methods (bridge compat) ---
-
-    def _prefill_one(
-        self, request_id: str,
-        input_ids: torch.Tensor, cache: KVCache
-    ) -> int:
-        logits = cache.prefill(self.model, input_ids)
-        token = greedy_sample(logits).item()
-        if request_id not in self.request_state.req_id_to_index:
-            self.request_state.add_request(request_id, [0])
-        self.request_state.set_last_sampled_token(request_id, token)
-        return token
-
-    def _decode_one_legacy(
-        self, request_id: str, cache: KVCache
-    ) -> int:
-        token = self.request_state.get_last_token(request_id)
-        if token == 0:
-            return self.eos_token_id
-        next_input = torch.tensor([token], device=self.device)
-        logits = cache.decode(self.model, next_input)
-        next_token = greedy_sample(logits).item()
-        self.request_state.set_last_sampled_token(request_id, next_token)
-        self.request_state.append_output_token(request_id, next_token)
-        return next_token
 
     def get_step(self, request_id: str) -> int:
         return self.request_state.get_step(request_id)

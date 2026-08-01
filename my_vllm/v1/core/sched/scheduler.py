@@ -13,6 +13,7 @@ from my_vllm.v1.core.sched.output import (
     SchedulerOutput,
 )
 from my_vllm.v1.core.sched.request_queue import FCFSRequestQueue
+from my_vllm.v1.outputs import EngineCoreOutputs, ModelRunnerOutput
 from my_vllm.v1.request import Request, RequestStatus
 
 
@@ -156,3 +157,41 @@ class Scheduler:
 
     def has_work(self) -> bool:
         return bool(self.waiting) or bool(self.running)
+
+    def update_from_output(
+        self,
+        scheduler_output: SchedulerOutput,
+        model_output: ModelRunnerOutput,
+        eos_token_id: int,
+        max_tokens: int,
+    ) -> EngineCoreOutputs:
+        """Detect finished requests from model output.
+
+        C032: EngineCore delegates finish detection to the scheduler
+        instead of iterating requests inline.  OutputProcessor still
+        handles token appending and detokenization for correct ordering.
+        """
+        finished: list[Request] = []
+        for rid, token_ids in model_output.sampled_token_ids.items():
+            req = self._find_request(rid)
+            if req is None:
+                continue
+            for tok in token_ids:
+                if tok == eos_token_id:
+                    req.status = RequestStatus.FINISHED_STOPPED
+                    break
+            limit = req.max_tokens or max_tokens
+            if req.num_output_tokens + len(token_ids) >= limit and not req.is_finished():
+                req.status = RequestStatus.FINISHED_LENGTH_CAPPED
+            if req.is_finished():
+                finished.append(req)
+        return EngineCoreOutputs(
+            finished_requests=finished,
+            sampled_token_ids=model_output.sampled_token_ids,
+        )
+
+    def _find_request(self, request_id: str) -> Request | None:
+        for req in self.running:
+            if req.request_id == request_id:
+                return req
+        return None

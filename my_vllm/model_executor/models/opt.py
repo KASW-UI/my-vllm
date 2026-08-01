@@ -1,7 +1,7 @@
-"""OPT model — re-export from runtime/models/opt.py.
+"""OPT model — placeholder.
 
-C031: model_executor/models/ namespace for model implementations.
-Bridges to the existing runtime models.
+C032: runtime/models/opt.py was a broken stub that never existed.
+Kept as a namespace entry point for model_executor/models/.
 """
 
-from my_vllm.runtime.models.opt import OPTForCausalLM  # noqa: F401
+from transformers import OPTForCausalLM  # noqa: F401
