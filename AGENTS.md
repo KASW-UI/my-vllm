@@ -43,6 +43,7 @@ my_vllm/v1/
   sample/          # Sampler (nn.Module), LogitsProcessor
   metrics/         # collector
   request.py       # Request dataclass (11 statuses)
+  kv_cache_interface.py  # KVCacheSpec, FullAttentionSpec, SlidingWindowSpec, MLAAttentionSpec, KVCacheGroupSpec
 ```
 
 Legacy stub directories (mostly empty `__init__.py` after C032 cleanup):
@@ -133,6 +134,7 @@ whether to port, simplify, or analyze.
 - PagedAttention ops are pure PyTorch (`reshape_and_cache_pytorch`, `gather_cached_kv_pytorch`)
 - Sampler is an `nn.Module` subclass with penalties → temperature → top-k → top-p → sampling
 - Tensor parallel stubs degrade to identity when `world_size=1`
+- KVCacheSpec hierarchy: FullAttentionSpec (packed K/V, head_size_v), SlidingWindowSpec (swa window), MLAAttentionSpec (cache_dtype_str), 聚合类型 KVCacheGroupSpec 将同 typespec 层分组
 
 ## Model dependency
 
