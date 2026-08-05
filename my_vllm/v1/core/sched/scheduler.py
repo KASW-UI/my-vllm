@@ -4,9 +4,13 @@ C016: migrated from scheduler/scheduler.py.
 C029: prefix cache lookup via KVCacheManager.get_computed_blocks().
 C030: chunked prefill — long prompts split by token_budget;
       num_computed_tokens tracks prefill progress per-chunk.
+C034: uses KVCacheCoordinator instead of raw KVCacheManager.
 """
 
-from my_vllm.v1.core.kv_cache_manager import KVCacheManager
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from my_vllm.v1.core.sched.output import (
     CachedRequestData,
     NewRequestData,
@@ -15,6 +19,10 @@ from my_vllm.v1.core.sched.output import (
 from my_vllm.v1.core.sched.request_queue import FCFSRequestQueue
 from my_vllm.v1.outputs import EngineCoreOutputs, ModelRunnerOutput
 from my_vllm.v1.request import Request, RequestStatus
+
+if TYPE_CHECKING:
+    from my_vllm.v1.core.kv_cache_coordinator import KVCacheCoordinator
+    from my_vllm.v1.core.kv_cache_manager import KVCacheManager
 
 
 class Scheduler:
@@ -28,14 +36,20 @@ class Scheduler:
     def __init__(
         self,
         max_running: int = 8,
-        kv_cache_manager: KVCacheManager | None = None,
+        kv_cache_manager: "KVCacheManager | None" = None,
+        kv_cache_coordinator: "KVCacheCoordinator | None" = None,
         max_num_batched_tokens: int = 2048,
     ):
         self.waiting = FCFSRequestQueue()
         self.running: list[Request] = []
         self.max_running = max_running
         self.kv_cache_manager = kv_cache_manager
+        self.kv_cache_coordinator = kv_cache_coordinator
         self.max_num_batched_tokens = max_num_batched_tokens
+
+    def _get_cache_manager(self):
+        """Return the active cache interface: coordinator > manager."""
+        return self.kv_cache_coordinator or self.kv_cache_manager
 
     def add_request(self, request: Request):
         request.status = RequestStatus.WAITING
@@ -63,8 +77,9 @@ class Scheduler:
             )
 
             # Allocate additional blocks if needed for the new tokens
-            if self.kv_cache_manager is not None:
-                blocks = self.kv_cache_manager.allocate_slots(
+            cache = self._get_cache_manager()
+            if cache is not None:
+                blocks = cache.allocate_slots(
                     req, req.num_computed_tokens
                 )
                 if blocks is None:
@@ -85,13 +100,14 @@ class Scheduler:
             prompt_len = len(req.prompt_token_ids)
             num_cached = 0
 
-            if self.kv_cache_manager is not None:
+            cache = self._get_cache_manager()
+            if cache is not None:
                 cached_blocks, num_cached = (
-                    self.kv_cache_manager.get_computed_blocks(req)
+                    cache.get_computed_blocks(req)
                 )
                 req.num_computed_tokens = num_cached
 
-                blocks = self.kv_cache_manager.allocate_slots(
+                blocks = cache.allocate_slots(
                     req, prompt_len
                 )
                 if blocks is None:
@@ -145,12 +161,13 @@ class Scheduler:
 
     def finish(self, request: Request):
         if request in self.running:
-            if self.kv_cache_manager is not None:
-                blocks = self.kv_cache_manager.get_blocks(
+            cache = self._get_cache_manager()
+            if cache is not None:
+                blocks = cache.get_blocks(
                     request.request_id
                 )
                 if blocks:
-                    self.kv_cache_manager.block_pool.cache_full_blocks(
+                    cache.block_pool.cache_full_blocks(
                         request, blocks
                     )
             self.running.remove(request)

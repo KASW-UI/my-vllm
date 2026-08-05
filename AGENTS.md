@@ -36,7 +36,7 @@ There is no CI, no lint, no formatter, no typecheck configured.
 my_vllm/v1/
   engine/          # EngineCore, LLMEngine, AsyncLLM, I/O processors, detokenizer
   core/sched/      # Scheduler (FCFS, chunked-prefill, prefix-cache aware)
-  core/            # BlockPool, KVCacheManager, kv_cache_utils
+  core/            # BlockPool, KVCacheManager, kv_cache_utils, kv_cache_coordinator
   worker/          # Worker, GPUModelRunner, physical KV cache pool
   executor/        # ABC + UniProcExecutor
   attention/       # BackendABC, CommonAttentionMetadata, backends/ops/paged_attn.py
@@ -117,11 +117,12 @@ whether to port, simplify, or analyze.
    Goal, New Features, File Tree, Runtime Flow (mermaid),
    Current Capability, Current Limitation, Next Stage
 4. Tag with `Cxxx-description` (e.g. `git tag C033-kernel`)
-5. Never modify earlier stages' code; if a fix is needed, create a new fix commit
-6. See `Principle/Commit-Standard.md` for the full rules
-7. Read the matching `Principle/CXXX-CYYY/` design doc for stage-specific requirements
-8. If the design doc has `## AGENTS.md update`, apply those changes and include AGENTS.md in the commit
-9. After commit, output: commit message, file diff summary, file tree,
+5. Push commit and tag to remote: `git push origin main && git push origin Cxxx-description`
+6. Never modify earlier stages' code; if a fix is needed, create a new fix commit
+7. See `Principle/Commit-Standard.md` for the full rules
+8. Read the matching `Principle/CXXX-CYYY/` design doc for stage-specific requirements
+9. If the design doc has `## AGENTS.md update`, apply those changes and include AGENTS.md in the commit
+10. After commit, output: commit message, file diff summary, file tree,
    architecture diagram (mermaid), capabilities, limitations,
    benchmark (skip if no performance code — see Commit-Standard rule 7)
 
@@ -135,6 +136,7 @@ whether to port, simplify, or analyze.
 - Sampler is an `nn.Module` subclass with penalties → temperature → top-k → top-p → sampling
 - Tensor parallel stubs degrade to identity when `world_size=1`
 - KVCacheSpec hierarchy: FullAttentionSpec (packed K/V, head_size_v), SlidingWindowSpec (swa window), MLAAttentionSpec (cache_dtype_str), 聚合类型 KVCacheGroupSpec 将同 typespec 层分组
+- KVCacheCoordinator dispatches to per-type KVCacheManagers: FullAttentionManager, SlidingWindowManager
 
 ## Model dependency
 

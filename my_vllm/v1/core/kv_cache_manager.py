@@ -126,6 +126,30 @@ class KVCacheManager:
 
         return KVCacheBlocks.empty(), 0
 
+    def get_computed_blocks_mgr(
+        self, block_hashes: list[bytes]
+    ) -> list["KVCacheBlock"]:
+        """Find prefix cache hits from a block hash list directly.
+
+        C034: extracted from get_computed_blocks() so KVCacheCoordinator
+        can query each manager independently without a Request object.
+        """
+        if not self.block_pool.enable_caching:
+            return []
+
+        cached_blocks: list[KVCacheBlock] = []
+        for block_hash in block_hashes:
+            if not block_hash:
+                break
+            cached = self.block_pool.get_cached_block(block_hash)
+            if cached is None:
+                break
+            cached_blocks.append(cached)
+
+        if cached_blocks:
+            return cached_blocks
+        return []
+
     def get_block_ids(self, request_id: str) -> list[int]:
         bt = self.request_blocks.get(request_id, [])
         return [b.block_id for b in bt]

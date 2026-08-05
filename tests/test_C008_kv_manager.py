@@ -152,6 +152,6 @@ def test_kv_cache_manager_e2e():
     for req in sm.finished:
         text = tokenizer.decode(req.output_token_ids)
         assert len(text) > 0
-        assert sm.kv_cache_manager.get_cache(req.request_id) is None
+        assert sm.kv_cache_coordinator.get_blocks(req.request_id) == []
         print(f"[{req.request_id}] {req.status.name} "
               f"({len(req.output_token_ids)} tokens)")

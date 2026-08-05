@@ -1,10 +1,15 @@
 import torch
 
 from my_vllm.v1.core.block_pool import BlockPool
-from my_vllm.v1.core.kv_cache_manager import KVCacheManager
+from my_vllm.v1.core.kv_cache_coordinator import KVCacheCoordinator
 from my_vllm.v1.core.sched.scheduler import Scheduler
 from my_vllm.v1.engine.output_processor import OutputProcessor, RequestOutput
 from my_vllm.v1.executor.abstract import Executor
+from my_vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
 from my_vllm.v1.request import Request, RequestStatus
 
 
@@ -26,6 +31,8 @@ class EngineCore:
         num_kv_blocks: int = 512,
         block_size: int = 16,
         tokenizer=None,
+        num_kv_heads: int = 12,
+        head_size: int = 64,
     ):
         self.max_new_tokens = max_new_tokens
         self.eos_token_id = eos_token_id
@@ -35,10 +42,29 @@ class EngineCore:
         self.worker = executor.get_worker()
 
         block_pool = BlockPool(num_kv_blocks, block_size, enable_caching=True)
-        self.kv_cache_manager = KVCacheManager(block_pool=block_pool)
+
+        # C034: build KVCacheConfig → KVCacheCoordinator
+        spec = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=num_kv_heads,
+            head_size=head_size,
+        )
+        kv_cache_config = KVCacheConfig(
+            num_blocks=num_kv_blocks,
+            kv_cache_groups=[
+                KVCacheGroupSpec(
+                    layer_names=["all"],
+                    kv_cache_spec=spec,
+                )
+            ],
+        )
+        self.kv_cache_coordinator = KVCacheCoordinator(
+            kv_cache_config=kv_cache_config,
+            block_pool=block_pool,
+        )
         self.scheduler = Scheduler(
             max_running=max_running,
-            kv_cache_manager=self.kv_cache_manager,
+            kv_cache_coordinator=self.kv_cache_coordinator,
         )
         self.finished: list[Request] = []
 
@@ -88,7 +114,7 @@ class EngineCore:
 
     def _finish_request(self, req: Request):
         rid = req.request_id
-        self.kv_cache_manager.free(rid)
+        self.kv_cache_coordinator.free(rid)
         self.worker.cleanup(rid)
         self.scheduler.finish(req)
         self.output_processor.cleanup(rid)
