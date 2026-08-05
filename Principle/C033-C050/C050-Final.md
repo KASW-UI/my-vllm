@@ -10,6 +10,8 @@ my_vllm/
 ├── __init__.py
 ├── config.py                    # EngineConfig (C032) — 保持简化，C069 拆分
 │
+├── forward_context.py            # BatchDescriptor, set/get_forward_context()  ← C041
+│
 ├── v1/
 │   ├── __init__.py
 │   ├── request.py               # Request + RequestStatus (12 状态) + SamplingParams
@@ -19,7 +21,6 @@ my_vllm/
 │   ├── kv_cache_interface.py    # KVCacheSpec, FullAttentionSpec,                  ← C033
 │   │                            # SlidingWindowSpec, MLAAttentionSpec,
 │   │                            # KVCacheGroupSpec, KVCacheConfig
-│   ├── forward_context.py       # BatchDescriptor, set/get_forward_context()        ← C041
 │   ├── cudagraph_dispatcher.py  # CudagraphDispatcher                              ← C044
 │   │
 │   ├── engine/
@@ -77,22 +78,22 @@ my_vllm/
 │   │   ├── __init__.py
 │   │   ├── backend.py                # AttentionType, AttentionBackend/Impl, MetadataBuilder
 │   │   ├── selector.py               # get_attn_backend()
-│   │   ├── registry.py               # AttentionBackendEnum                           ← C042
-│   │   └── backends/
+│   │   ├── backends/
+│   │   │   ├── __init__.py
+│   │   │   ├── registry.py           # AttentionBackendEnum                           ← C042
+│   │   │   ├── torch_attn.py         # my-vllm 特有: vLLM V1 无此后端, 仅 TORCH_SDPA 用于 ViT
+│   │   │   ├── flash_attn.py         # FlashAttentionBackend + FlashAttentionImpl      ← C043-A
+│   │   │   │                         #   + FlashAttentionMetadataBuilder
+│   │   │   └── triton_attn.py        # TritonAttentionBackend                          ← C043-B
+│   │   └── ops/
 │   │       ├── __init__.py
-│   │       ├── torch_attn.py         # my-vllm 特有: vLLM V1 无此后端, 仅 TORCH_SDPA 用于 ViT
-│   │       ├── flash_attn.py         # FlashAttentionBackend + FlashAttentionImpl      ← C043-A
-│   │       │                         #   + FlashAttentionMetadataBuilder
-│   │       ├── triton_attn.py        # TritonAttentionBackend                          ← C043-B
-│   │       └── ops/
-│   │           ├── __init__.py
-│   │           ├── paged_attn.py
-│   │           ├── triton_reshape_and_cache_flash.py          ← C043-C
-│   │           ├── triton_decode_attention.py            ← C043-C
-│   │           ├── triton_prefill_attention.py           ← C043-C
-│   │           ├── triton_unified_attention.py           ← C043-B (custom op dispatch)
-│   │           ├── chunked_prefill_paged_decode.py       ← C043-C
-│   │           └── flash_attention_tiled.py             ← C043 (教育性 tiled attention kernel)
+│   │       ├── paged_attn.py
+│   │       ├── triton_reshape_and_cache_flash.py              ← C043-C
+│   │       ├── triton_decode_attention.py                   ← C043-C
+│   │       ├── triton_prefill_attention.py                  ← C043-C
+│   │       ├── triton_unified_attention.py                  ← C043-B (custom op dispatch)
+│   │       ├── chunked_prefill_paged_decode.py              ← C043-C
+│   │       └── flash_attention_tiled.py                     ← C043 (教育性 tiled attention kernel)
 │   │
 │   ├── sample/
 │   │   ├── __init__.py
@@ -109,7 +110,7 @@ my_vllm/
 │
 ├── model_executor/
 │   ├── __init__.py
-│   ├── model_loader.py               # load_model() (C032 内联)
+│   ├── model_loader/               # load_model() (C032 内联)
 │   ├── models/opt.py
 │   └── layers/
 │       ├── __init__.py
@@ -131,7 +132,7 @@ my_vllm/
 │
 ├── runtime/                          # Legacy (test compat)
 │   ├── __init__.py
-│   ├── model_loader.py, tokenizer.py, model.py
+│   ├── model_loader/, tokenizer.py, model.py
 │
 ├── server/                           # C014 legacy, deprecated
 ├── examples/
@@ -484,9 +485,9 @@ EngineCore.step() / step_with_batch_queue()
 | `v1/worker/block_table.py` | Python for loop | Triton compute_slot_mappings(idx_mapping, query_start_loc, positions, num_tokens_padded), gather_block_tables(), apply_staged_writes() |
 | `v1/worker/gpu/attn_utils.py` | **不存在** | init_attn_backend(), init_kv_cache(), build_attn_metadata(), build_slot_mappings_by_layer() |
 | `v1/worker/utils.py` | **不存在** | AttentionGroup, bind_kv_cache() |
-| `v1/forward_context.py` | **不存在** | BatchDescriptor(frozen, has_lora, num_active_loras), set_forward_context(), get_forward_context() |
+| `forward_context.py` | **不存在** | BatchDescriptor(frozen, has_lora, num_active_loras), set_forward_context(), get_forward_context() |
 | `v1/attention/backend.py` | 基础 ABC | +AttentionType(DECODER/ENCODER/...), AttentionImplBase, AttentionMetadataBuilder(ABC), CommonAttentionMetadata, get_kv_cache_shape() |
-| `v1/attention/registry.py` | **不存在** | AttentionBackendEnum (FLASH_ATTN, TRITON_ATTN, TORCH_SDPA) |
+| `v1/attention/backends/registry.py` | **不存在** | AttentionBackendEnum (FLASH_ATTN, TRITON_ATTN, TORCH_SDPA) |
 | `v1/attention/backends/flash_attn.py` | 存在 (stub) | C043-A: FlashAttentionBackend + FlashAttentionImpl + FlashAttentionMetadataBuilder 完整实现（PyTorch, 不依赖 flash-attn 库）。对齐 vLLM get_kv_cache_shape 和 backend dispatch |
 | `v1/attention/backends/triton_attn.py` | **不存在** | C043-B: TritonAttentionBackend + TritonAttentionImpl（对齐 vLLM） |
 | `v1/attention/ops/triton_reshape_and_cache_flash.py` | **不存在** | C043-C: Triton reshape_and_cache kernel |
