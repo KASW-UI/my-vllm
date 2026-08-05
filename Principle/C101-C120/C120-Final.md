@@ -13,9 +13,10 @@ my_vllm/                                      # C100 已有 ~90 个文件
 │
 ├── v1/                                       # C100 已有
 │   ├── engine/
-│   │   ├── coordinator.py                 # C101: DPGroup, WaveScheduler
-│   │   │                                    #   对齐 vLLM DPEngineCoreProc
+│   │   ├── coordinator.py                 # C101: DPCoordinator
+│   │   │                                    #   对齐 vLLM v1/engine/coordinator.py
 │   │   └── weight_transfer_analysis.md       # C110: RL Training 权重同步分析
+│   │                                        #   vs vLLM: distributed/weight_transfer/
 │   │
 │   ├── core/
 │   │   └── kv_connector.py                   # C102: KVConnectorBase,
@@ -24,45 +25,53 @@ my_vllm/                                      # C100 已有 ~90 个文件
 │   │
 │   ├── worker/
 │   │   └── chunked_prefill_analysis.md       # C107: prefill chunking + hybrid batch
+│   │                                        #   vs vLLM: v1/core/sched/scheduler.py
 │   │
 │   ├── attention/backends/
 │   │   └── flashinfer_analysis.md            # C105: FlashInfer 性能分析
+│   │                                        #   vs vLLM: v1/attention/backends/flashinfer.py
 │   │
 │   └── spec_decode/
 │       └── proposer_comparison.md            # C111: 5 种 proposer 对比
+│                                            #   vs vLLM: v1/spec_decode/*.py
 │
 ├── mla/                                       # C100 已有 mla_layer.py
 │   ├── backends_analysis.md                  # C104: 6 backends 对比分析
+│   │                                        #   vs vLLM: v1/attention/backends/mla/
 │   └── demo/
-│       └── mla_kernel_comparison.py           # C104 demo: PyTorch vs Triton MLA
+│       └── mla_kernel_comparison.py           # C112: Triton fused vs PyTorch naive MLA
 │
 ├── distributed/                               # C100 已有
 │   ├── custom_all_reduce_analysis.md         # C106: custom all-reduce 拓扑 + 源码
+│   │                                        #   vs vLLM: distributed/device_communicators/custom_all_reduce.py
 │   ├── elastic_ep_analysis.md                # C109: Elastic EP 状态机 + 流程
+│   │                                        #   vs vLLM: distributed/elastic_ep/elastic_state.py
 │   └── demo/
-│       ├── all_reduce_topology.py             # C106 demo: GPU 通信拓扑 + 带宽
-│       └── elastic_ep_state_machine.py        # C109 demo: 扩缩容状态转换
+│       ├── all_reduce_topology_demo.py        # C113: GPU 通信拓扑 + 带宽
+│       └── elastic_ep_state_demo.py           # C113: 扩缩容状态转换
 │
 ├── model_executor/layers/quantization/
 │   ├── methods_analysis.md                   # C108: FP8/AWQ/GPTQ/Marlin/NVFP4 全景
+│   │                                        #   vs vLLM: model_executor/layers/quantization/
 │   └── demo/
-│       └── weight_packing_demo.py             # C108 demo: AWQ/GPTQ/Marlin packing
+│       └── weight_packing_demo.py             # C115: 4 种 format 可视化
 │
 ├── v1/attention/backends/demo/
-│   └── flashinfer_paged_demo.py              # C105 demo: FlashInfer paged decode
+│   └── flashinfer_paged_demo.py              # C112: FlashInfer paged decode
 │
 ├── v1/worker/demo/
-│   └── chunked_prefill_demo.py               # C107 demo: prefill chunk scheduling
+│   └── chunked_prefill_demo.py               # C114: prefill chunk scheduling
 │
 ├── v1/engine/demo/
-│   └── weight_transfer_demo.py               # C110 demo: save/load cycle
+│   └── weight_transfer_demo.py               # C116: save/load cycle
 │
 ├── v1/spec_decode/demo/
-│   └── draft_quality_comparison.py           # C111 demo: acceptance rate 对比
+│   └── draft_quality_comparison.py           # C116: 5 proposer acceptance rate
 │
 └── analysis/
     ├── dp_ep_tp_topology.md                  # C103: 3D 并行拓扑 + 决策树
-    └── c100_vs_c120.md                       # C119: C100→C120 综合能力对比
+    ├── c100_vs_c120.md                       # C119: C100→C120 综合能力对比
+    └── demo_verification.md                  # C117: 8 个 demo 验证结果汇总
 ```
 
 **数量对照**
@@ -234,25 +243,26 @@ C100 完整数据流
 
 | C120 文件 | C100 状态 | C120 vs vLLM |
 |-----------|-----------|----------------|
-| `v1/engine/coordinator.py` | **不存在** | DPGroup + WaveScheduler（对齐 vLLM DPEngineCoreProc） |
+| `v1/engine/coordinator.py` | **不存在** | DPCoordinator（对齐 vLLM `v1/engine/coordinator.py`） |
 | `v1/core/kv_connector.py` | **不存在** | KVConnectorBase + SharedMemoryKVConnector（对齐 vLLM） |
-| `mla/backends_analysis.md` | 不存在 | 6 backends 对比 + demo（对齐 vLLM `backends/mla/` 目录） |
-| `mla/demo/mla_kernel_comparison.py` | 不存在 | PyTorch vs Triton MLA demo |
-| `v1/attention/backends/flashinfer_analysis.md` | 不存在 | FlashInfer 性能分析（对齐 vLLM flashinfer backend） |
-| `v1/attention/backends/demo/flashinfer_paged_demo.py` | 不存在 | FlashInfer paged decode demo |
-| `distributed/custom_all_reduce_analysis.md` | 不存在 | Custom all-reduce 拓扑 + 源码分析（对齐 vLLM `device_communicators/`） |
-| `distributed/demo/all_reduce_topology.py` | 不存在 | GPU 通信拓扑 + 带宽 demo |
-| `v1/worker/chunked_prefill_analysis.md` | 不存在 | Chunked prefill + hybrid batch（对齐 vLLM scheduler.py prefill scheduling） |
-| `v1/worker/demo/chunked_prefill_demo.py` | 不存在 | Prefill chunk scheduling demo |
+| `mla/backends_analysis.md` | 不存在 | 6 backends 对比（对齐 vLLM `v1/attention/backends/mla/`） |
+| `mla/demo/mla_kernel_comparison.py` (C112) | 不存在 | PyTorch vs Triton MLA demo |
+| `v1/attention/backends/flashinfer_analysis.md` | 不存在 | FlashInfer 性能分析（对齐 vLLM `flashinfer.py`） |
+| `v1/attention/backends/demo/flashinfer_paged_demo.py` (C112) | 不存在 | FlashInfer paged decode demo |
+| `distributed/custom_all_reduce_analysis.md` | 不存在 | Custom all-reduce 拓扑（对齐 vLLM `device_communicators/custom_all_reduce.py`） |
+| `distributed/demo/all_reduce_topology_demo.py` (C113) | 不存在 | GPU 通信拓扑 + 带宽 demo |
+| `v1/worker/chunked_prefill_analysis.md` | 不存在 | Chunked prefill + hybrid batch（对齐 vLLM `scheduler.py`） |
+| `v1/worker/demo/chunked_prefill_demo.py` (C114) | 不存在 | Prefill chunk scheduling demo |
 | `model_executor/layers/quantization/methods_analysis.md` | 不存在 | FP8/AWQ/GPTQ/Marlin/NVFP4 全景 |
-| `model_executor/layers/quantization/demo/weight_packing_demo.py` | 不存在 | Weight packing visualization demo |
-| `distributed/elastic_ep_analysis.md` | 不存在 | Elastic EP 状态机 + 流程（对齐 vLLM `engine/core.py` EEP） |
-| `distributed/demo/elastic_ep_state_machine.py` | 不存在 | EP 扩缩容状态转换 demo |
-| `v1/engine/weight_transfer_analysis.md` | 不存在 | RL Training 权重同步（对齐 vLLM `save_sharded_state`） |
-| `v1/engine/demo/weight_transfer_demo.py` | 不存在 | Save/load cycle demo |
-| `v1/spec_decode/proposer_comparison.md` | 不存在 | 5 种 proposer 对比（对齐 vLLM `spec_decode/`） |
-| `v1/spec_decode/demo/draft_quality_comparison.py` | 不存在 | Acceptance rate 对比 demo |
+| `model_executor/layers/quantization/demo/weight_packing_demo.py` (C115) | 不存在 | 4 种 format 可视化 demo |
+| `distributed/elastic_ep_analysis.md` | 不存在 | Elastic EP 状态机（对齐 vLLM `elastic_ep/elastic_state.py`） |
+| `distributed/demo/elastic_ep_state_demo.py` (C113) | 不存在 | EP 扩缩容状态转换 demo |
+| `v1/engine/weight_transfer_analysis.md` | 不存在 | RL Training 权重同步（对齐 vLLM `distributed/weight_transfer/`） |
+| `v1/engine/demo/weight_transfer_demo.py` (C116) | 不存在 | Save/load cycle demo |
+| `v1/spec_decode/proposer_comparison.md` | 不存在 | 5 种 proposer 对比（对齐 vLLM `v1/spec_decode/`） |
+| `v1/spec_decode/demo/draft_quality_comparison.py` (C116) | 不存在 | Acceptance rate 对比 demo |
 | `analysis/dp_ep_tp_topology.md` | 不存在 | 3D 并行拓扑 + 决策树 |
+| `analysis/demo_verification.md` (C117) | 不存在 | 8 个 demo 验证结果汇总 |
 
 ---
 

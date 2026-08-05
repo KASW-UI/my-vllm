@@ -87,16 +87,24 @@ Each design doc specifies: industrial motivation, existing code baseline, exact 
 ## Reference codebase
 
 The real vLLM V1 source lives at `/home/kasw/文档/GitHub/GPU-Project/vllm`.
-When implementing a stage, **reference it for production patterns**:
-- API signatures, class hierarchies, module boundaries
-- KV cache shapes, attention metadata structures, scheduler output formats
+The **Principle design doc for each stage** determines how closely to reference it:
 
-Do NOT copy-paste blindly — extract the minimal interface contract needed. This project simulates the evolution, not a port.
+- **Production features** (C033–C050, C081–C086): match vLLM API signatures,
+  class hierarchies, and data structures as closely as practical.
+- **Education-only** (C050b, C062b, C063b, C104–C111, C121–C140):
+  reference vLLM for understanding, but implement simplified/educational versions.
+- **Analysis chapters** (C090, C104–C111): directly analyze vLLM source code.
+
+When in doubt, the Principle design doc is authoritative — it specifies
+whether to port, simplify, or analyze.
 
 ## Before EVERY code modification:
 
 - Re-read `Principle/Commit-Standard.md`
 - Read the matching Principle design doc for the target stage
+- Reference `/home/kasw/文档/GitHub/GPU-Project/vllm` at the depth specified
+  in `## Reference codebase` for this stage's range
+- If the doc contains an `## AGENTS.md update` section, apply those changes to AGENTS.md in the same commit
 - Verify the planned change complies with both
 - Only then modify code
 
@@ -104,11 +112,17 @@ Do NOT copy-paste blindly — extract the minimal interface contract needed. Thi
 
 1. One commit = one stage. Format: `Cxxx: Module: Description`
 2. Each commit must be runnable (`python run.py` or `pytest` must pass)
-3. Create `docs/snapshots/Cxxx.md` for the new stage
+3. Create `docs/snapshots/Cxxx.md` with required sections:
+   Goal, New Features, File Tree, Runtime Flow (mermaid),
+   Current Capability, Current Limitation, Next Stage
 4. Tag with `Cxxx-description` (e.g. `git tag C033-kernel`)
 5. Never modify earlier stages' code; if a fix is needed, create a new fix commit
 6. See `Principle/Commit-Standard.md` for the full rules
 7. Read the matching `Principle/CXXX-CYYY/` design doc for stage-specific requirements
+8. If the design doc has `## AGENTS.md update`, apply those changes and include AGENTS.md in the commit
+9. After commit, output: commit message, file diff summary, file tree,
+   architecture diagram (mermaid), capabilities, limitations,
+   benchmark (skip if no performance code — see Commit-Standard rule 7)
 
 ## Key architecture facts
 
