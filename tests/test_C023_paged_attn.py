@@ -113,7 +113,7 @@ def _get_input_ids(prompt_text):
 
 
 def _load_model():
-    from my_vllm.runtime.model_loader import load_model
+    from my_vllm.v1.model_executor.model_loader import load_model
     model = load_model(MODEL)
     device = next(model.parameters()).device
     return model, device

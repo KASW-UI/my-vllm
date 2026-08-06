@@ -8,7 +8,7 @@ preserved via direct model+device constructor.
 import torch
 import torch.nn as nn
 
-from my_vllm.distributed.parallel_state import init_distributed
+from my_vllm.v1.distributed.parallel_state import init_distributed
 from my_vllm.v1.outputs import ModelRunnerOutput
 from my_vllm.v1.worker.worker_base import WorkerBase
 from my_vllm.v1.worker.gpu_model_runner import GPUModelRunner

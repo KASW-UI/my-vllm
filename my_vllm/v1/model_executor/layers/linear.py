@@ -7,7 +7,7 @@ When world_size>1: shard weights across GPUs, all-gather / all-reduce.
 import torch
 import torch.nn as nn
 
-from my_vllm.distributed.parallel_state import (
+from my_vllm.v1.distributed.parallel_state import (
     all_gather,
     all_reduce,
     get_tp_world_size,

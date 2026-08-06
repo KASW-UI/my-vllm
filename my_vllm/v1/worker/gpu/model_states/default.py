@@ -8,7 +8,7 @@ C021: default implementation using runtime/model_loader + tokenizer.
 import torch
 import torch.nn as nn
 
-from my_vllm.runtime.model_loader import load_model
+from my_vllm.v1.model_executor.model_loader import load_model
 from my_vllm.runtime.tokenizer import load_tokenizer
 from my_vllm.v1.worker.gpu.model_states.interface import ModelState
 

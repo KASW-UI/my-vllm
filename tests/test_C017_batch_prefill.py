@@ -3,7 +3,7 @@
 import torch
 
 from my_vllm.runtime.tokenizer import load_tokenizer
-from my_vllm.runtime.model_loader import load_model
+from my_vllm.v1.model_executor.model_loader import load_model
 from my_vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from my_vllm.v1.core.sched.output import (
     SchedulerOutput, NewRequestData, CachedRequestData,

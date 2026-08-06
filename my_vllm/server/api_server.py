@@ -4,7 +4,7 @@ import json
 import uuid
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-from my_vllm.engine.llm_engine import LLMEngine
+from my_vllm.v1.engine.llm_engine import LLMEngine
 from my_vllm.v1.engine.async_llm import AsyncLLM
 
 
