@@ -41,7 +41,7 @@ my_vllm/                                      # C100 已有 ~90 个文件
 │   └── demo/
 │       └── mla_kernel_comparison.py           # C112: Triton fused vs PyTorch naive MLA
 │
-├── distributed/                               # C100 已有
+├── v1/distributed/                               # C100 已有
 │   ├── custom_all_reduce_analysis.md         # C106: custom all-reduce 拓扑 + 源码
 │   │                                        #   vs vLLM: distributed/device_communicators/custom_all_reduce.py
 │   ├── elastic_ep_analysis.md                # C109: Elastic EP 状态机 + 流程
@@ -50,7 +50,7 @@ my_vllm/                                      # C100 已有 ~90 个文件
 │       ├── all_reduce_topology_demo.py        # C113: GPU 通信拓扑 + 带宽
 │       └── elastic_ep_state_demo.py           # C113: 扩缩容状态转换
 │
-├── model_executor/layers/quantization/
+├── v1/model_executor/layers/quantization/
 │   ├── methods_analysis.md                   # C108: FP8/AWQ/GPTQ/Marlin/NVFP4 全景
 │   │                                        #   vs vLLM: model_executor/layers/quantization/
 │   └── demo/
@@ -249,14 +249,14 @@ C100 完整数据流
 | `mla/demo/mla_kernel_comparison.py` (C112) | 不存在 | PyTorch vs Triton MLA demo |
 | `v1/attention/backends/flashinfer_analysis.md` | 不存在 | FlashInfer 性能分析（对齐 vLLM `flashinfer.py`） |
 | `v1/attention/backends/demo/flashinfer_paged_demo.py` (C112) | 不存在 | FlashInfer paged decode demo |
-| `distributed/custom_all_reduce_analysis.md` | 不存在 | Custom all-reduce 拓扑（对齐 vLLM `device_communicators/custom_all_reduce.py`） |
-| `distributed/demo/all_reduce_topology_demo.py` (C113) | 不存在 | GPU 通信拓扑 + 带宽 demo |
+| `v1/distributed/custom_all_reduce_analysis.md` | 不存在 | Custom all-reduce 拓扑（对齐 vLLM `device_communicators/custom_all_reduce.py`） |
+| `v1/distributed/demo/all_reduce_topology_demo.py` (C113) | 不存在 | GPU 通信拓扑 + 带宽 demo |
 | `v1/worker/chunked_prefill_analysis.md` | 不存在 | Chunked prefill + hybrid batch（对齐 vLLM `scheduler.py`） |
 | `v1/worker/demo/chunked_prefill_demo.py` (C114) | 不存在 | Prefill chunk scheduling demo |
-| `model_executor/layers/quantization/methods_analysis.md` | 不存在 | FP8/AWQ/GPTQ/Marlin/NVFP4 全景 |
-| `model_executor/layers/quantization/demo/weight_packing_demo.py` (C115) | 不存在 | 4 种 format 可视化 demo |
-| `distributed/elastic_ep_analysis.md` | 不存在 | Elastic EP 状态机（对齐 vLLM `elastic_ep/elastic_state.py`） |
-| `distributed/demo/elastic_ep_state_demo.py` (C113) | 不存在 | EP 扩缩容状态转换 demo |
+| `v1/model_executor/layers/quantization/methods_analysis.md` | 不存在 | FP8/AWQ/GPTQ/Marlin/NVFP4 全景 |
+| `v1/model_executor/layers/quantization/demo/weight_packing_demo.py` (C115) | 不存在 | 4 种 format 可视化 demo |
+| `v1/distributed/elastic_ep_analysis.md` | 不存在 | Elastic EP 状态机（对齐 vLLM `elastic_ep/elastic_state.py`） |
+| `v1/distributed/demo/elastic_ep_state_demo.py` (C113) | 不存在 | EP 扩缩容状态转换 demo |
 | `v1/engine/weight_transfer_analysis.md` | 不存在 | RL Training 权重同步（对齐 vLLM `distributed/weight_transfer/`） |
 | `v1/engine/demo/weight_transfer_demo.py` (C116) | 不存在 | Save/load cycle demo |
 | `v1/spec_decode/proposer_comparison.md` | 不存在 | 5 种 proposer 对比（对齐 vLLM `v1/spec_decode/`） |
