@@ -34,6 +34,7 @@ There is no CI, no lint, no formatter, no typecheck configured.
 
 ```
 my_vllm/v1/
+  config.py        # EngineConfig
   engine/          # EngineCore, LLMEngine, AsyncLLM, I/O processors, detokenizer
   core/sched/      # Scheduler (FCFS, chunked-prefill, prefix-cache aware)
   core/            # BlockPool, KVCacheManager, kv_cache_utils
@@ -41,29 +42,42 @@ my_vllm/v1/
   executor/        # ABC + UniProcExecutor
   attention/       # BackendABC, CommonAttentionMetadata, backends/ops/paged_attn.py
   sample/          # Sampler (nn.Module), LogitsProcessor
+  model_executor/  # model_loader, layers/linear (TP), models/opt
+  distributed/     # parallel_state (TP, world_size=1 identity)
   metrics/         # collector
   request.py       # Request dataclass (11 statuses)
+  outputs.py       # SamplerOutput, ModelRunnerOutput, EngineCoreOutput(s)
+  utils.py         # ConstantList
+  serial_utils.py  # MsgpackEncoder/Decoder for IPC
   kv_cache_interface.py  # KVCacheSpec, FullAttentionSpec, SlidingWindowSpec, MLAAttentionSpec, KVCacheGroupSpec
 ```
 
-Legacy stub directories (mostly empty `__init__.py` after C032 cleanup):
+Legacy stub directories (empty `__init__.py` only — deleted stub helpers in C032):
 
 ```
-my_vllm/engine/        # ← abandoned, bridge imports removed in C032
 my_vllm/cache/         # ← abandoned
 my_vllm/scheduler/     # ← abandoned
 my_vllm/worker/        # ← abandoned
 my_vllm/executor/      # ← abandoned
-my_vllm/server/        # ← abandoned (examples/server.py uses this — outdated)
 my_vllm/generation/    # ← abandoned
 my_vllm/batch/         # ← abandoned
+```
+
+After C032-clean: `config.py`, `distributed/`, `model_executor/` moved into `v1/`;
+`engine/` removed entirely; `runtime/model_loader.py` deleted (duplicate);
+`server/async_llm.py` deleted (dead bridge). Remaining top-level dirs:
+
+```
+my_vllm/runtime/       # tokenizer.py, model.py (legacy shim), main.py (entry)
+my_vllm/server/        # api_server.py (HTTP entry point)
+my_vllm/metrics/       # bridge → v1/metrics/collector
 ```
 
 **Do not write new code into the legacy directories.** All new code goes under `my_vllm/v1/`.
 
 ## Configuration
 
-`my_vllm/config.py` — `EngineConfig` dataclass. Defaults:
+`my_vllm/v1/config.py` — `EngineConfig` dataclass. Defaults:
 - model: `facebook/opt-125m` (local at `/home/kasw/文档/GitHub/cpu-vllm/opt-125m`)
 - dtype: `bfloat16`, block_size: `16`, num_kv_blocks: `512`, max_running: `8`
 - enforce_eager: `True`, max_new_tokens: `50`, eos_token_id: `2`
