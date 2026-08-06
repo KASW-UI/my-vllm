@@ -625,7 +625,7 @@ C031 目标（对齐 V1）:
 | `v1/attention/backend.py` | **不存在** | 需新增 AttentionBackend + AttentionImpl + CommonAttentionMetadata |
 | `v1/attention/metadata.py` | **不存在** | 需新增 AttentionMetadata 基类 |
 | `v1/attention/backends/flash_attn.py` | **不存在** | 需新增 FlashAttentionBackend（简化版：PyTorch SDPA + PagedAttention） |
-| `v1/attention/backends/ops/paged_attn.py` | **不存在** | 需新增 PagedAttention PyTorch 实现 |
+| ``v1/attention/ops/paged_attn.py`` | **不存在** | 需新增 PagedAttention PyTorch 实现 |
 | `v1/sample/sampler.py` | `generation/sampler.py` | 6 行函数 → `Sampler(nn.Module)` + logits processor + penalties pipeline |
 | `v1/metrics/collector.py` | `metrics/collector.py` | 内部重构，接口保留 |
 

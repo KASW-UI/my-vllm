@@ -158,13 +158,13 @@ src/
 提交前必须验证：
 
 ```bash
-python examples/run.py
-````
+python run.py       # V1 engine 入口（C032+）
+```
 
 或者：
 
 ```bash
-pytest
+pytest tests/
 ```
 
 确保：
@@ -245,6 +245,10 @@ C004 fix commit。
 
 7. Benchmark结果
 
+> 第7项仅在涉及性能代码变更的阶段（kernel 实现、attention backend、
+> executor 并行策略、quantization 等）需要。纯类型定义、接口抽象、
+> 分析文档、demo 等阶段标注 "N/A — 无性能代码变更"。
+
 ---
 
 # 8. 项目目标
@@ -308,6 +312,17 @@ C014 Production Runtime
 
 ```
 每一个阶段都必须能够独立查看和运行。
+
+---
+
+# 9. 每个阶段必须同步更新 AGENTS.md
+
+如果本阶段新增/删除/修改了模块或架构事实，必须在同一 commit 中更新
+AGENTS.md 的具体描述，保证 `git checkout Cxxx` 时 AGENTS.md
+反映该阶段的真实状态。
+
+具体变更清单见对应 Principle 设计文档每章末尾的
+`## AGENTS.md update` 小节。
 
 ---
 
