@@ -1,77 +1,61 @@
 """GPU Worker — mirrors vLLM V1 v1/worker/gpu_worker.py.
 
 C017: adds execute_model(SchedulerOutput) → ModelRunnerOutput.
-C021: accepts ModelState for model lifecycle; backward compat
-preserved via direct model+device constructor.
+C021: accepts ModelState for model lifecycle.
+C032: Worker loads model internally via GPUModelRunner.load_model()
+— model is no longer passed in from run.py.  Matches vLLM lifecycle.
 """
-
-import torch
-import torch.nn as nn
 
 from my_vllm.v1.distributed.parallel_state import init_distributed
 from my_vllm.v1.outputs import ModelRunnerOutput
 from my_vllm.v1.worker.worker_base import WorkerBase
 from my_vllm.v1.worker.gpu_model_runner import GPUModelRunner
-from my_vllm.v1.worker.gpu.model_states.interface import ModelState
-
-
-class _DirectModelState(ModelState):
-    """Internal wrapper when model + device are passed directly."""
-
-    def __init__(self, model: nn.Module, device: torch.device):
-        self._model = model
-        self._device = device
-        self._dtype = next(model.parameters()).dtype
-
-    def load_model(self) -> nn.Module:
-        return self._model
-
-    def get_device(self) -> torch.device:
-        return self._device
-
-    def get_dtype(self) -> torch.dtype:
-        return self._dtype
 
 
 class Worker(WorkerBase):
-    """GPU Worker owning ModelRunner.
+    """GPU Worker owning ModelRunner — mirrors vLLM V1 Worker.
 
-    C021: accepts ModelState for model lifecycle management.
-    Backward compat: can also receive model+device directly.
+    C032: receives EngineConfig and creates GPUModelRunner internally.
+    The worker calls model_runner.load_model() during init_device(),
+    matching vLLM's deep model loading chain:
+    Executor → Worker.init_device() → GPUModelRunner.load_model()
     """
 
     def __init__(
         self,
-        model: nn.Module | None = None,
-        device: torch.device | None = None,
-        model_state: ModelState | None = None,
+        model_name: str = "facebook/opt-125m",
+        dtype_str: str = "bfloat16",
         eos_token_id: int = 2,
+        block_size: int = 16,
+        max_num_blocks: int = 256,
+        max_num_reqs: int = 64,
         rank: int = 0,
         world_size: int = 1,
     ):
         super().__init__(rank=rank, world_size=world_size)
 
-        if model_state is not None:
-            self.model_state = model_state
-        elif model is not None and device is not None:
-            self.model_state = _DirectModelState(model, device)
-        else:
-            raise ValueError(
-                "Provide model_state or (model, device)"
-            )
-
+        self.model_name = model_name
+        self.dtype_str = dtype_str
         self.eos_token_id = eos_token_id
+        self.block_size = block_size
+        self.max_num_blocks = max_num_blocks
+        self.max_num_reqs = max_num_reqs
         self._model_runner: GPUModelRunner | None = None
 
     def init_device(self):
+        """Mirrors vLLM Worker.init_device(): init dist + load model."""
         init_distributed(
             world_size=self.world_size, rank=self.rank
         )
-        model = self.model_state.load_model()
-        device = self.model_state.get_device()
         self._model_runner = GPUModelRunner(
-            model, device, eos_token_id=self.eos_token_id
+            model_name=self.model_name,
+            dtype_str=self.dtype_str,
+            eos_token_id=self.eos_token_id,
+            block_size=self.block_size,
+            max_num_blocks=self.max_num_blocks,
+            max_num_reqs=self.max_num_reqs,
         )
+        self._model_runner.load_model()
 
     def _runner(self) -> GPUModelRunner:
         if self._model_runner is None:

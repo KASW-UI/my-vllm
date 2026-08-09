@@ -2,7 +2,9 @@
 
 ## Project identity
 
-This is an **educational simulation** of the vLLM V1 serving runtime. Each Git commit represents one architectural evolution stage (C001→C032), in sequence. The Git history itself is the curriculum — **never squash or rebase**. Every commit has a matching `docs/snapshots/Cxxx.md` and a Git tag.
+This is an **educational simulation** of the vLLM V1 serving runtime. Each Git commit represents one architectural evolution stage (C001→C098 planned), in sequence. The Git history itself is the curriculum — **never squash or rebase**. Every commit has a matching `docs/snapshots/Cxxx.md` and a Git tag.
+
+**Current baseline**: C032 (`C032-cleanup` tag). C033 and C034 were implemented on an unmerged branch and are **abandoned (废案)**. A model-loading architecture fix was applied post-C032 to align with vLLM's deep loading chain (Executor → Worker → GPUModelRunner). Future work starts from this baseline following the career-focused plan at `Base-on-C032-Focus-Career/README.md`.
 
 Architecture reference: `C014-Final.md` at repo root.
 
@@ -30,7 +32,7 @@ There is no CI, no lint, no formatter, no typecheck configured.
 
 ## Package layout — real code vs. stale stubs
 
-**Active code lives in `my_vllm/v1/`.** This is the real engine.
+**Active code lives in `my_vllm/v1/`.** This is the real engine. API names (classes, methods, file names) are extracted from real vLLM at `/home/kasw/文档/GitHub/GPU-Project/vllm` and simplified for education.
 
 ```
 my_vllm/v1/
@@ -93,30 +95,52 @@ When implementing a new stage CXXX, **first read the corresponding Principle des
 | C032 | `Principle/C032/C032.md` |
 | C033–C050 | `Principle/C033-C050/C033-C050.md`, `C050-Final.md` |
 | C051–C070 | `Principle/C051-C070/C051-C070.md`, `C070-Final.md` |
-| C071–C100 | `Principle/C071-C100/` |
-| C101–C120 | `Principle/C101-C120/` |
-| C121–C140 | `Principle/C121-C140/` |
+| C071–C100 | `Principle/C071-C100/C070-C100.md`, `C100-Final.md` |
+| C101–C120 | `Principle/C101-C120/C101-C120.md` |
+| C121–C140 | `Principle/C121-C140/C121-C140.md` |
 
 Each design doc specifies: industrial motivation, existing code baseline, exact file changes, acceptance criteria, and what NOT to change. This is the authoritative spec for that stage.
+
+**Career-focused implementation plan**: `Base-on-C032-Focus-Career/README.md` overrides the default ordering within each group. Stages are classified:
+
+| Priority | Meaning | Count |
+|---|---|---|
+| **P0** | Must implement — full code, runnable commit | 24 stages |
+| **P1** | Lightweight implementation or analysis doc | 13 stages |
+| **P2** | Intentionally skipped (see plan for rationale) | 61 stages |
+
+When implementing a new stage, first check `Base-on-C032-Focus-Career/README.md` for its priority and recommended execution order. P2 stages (including C033, C034, C043-A/B/C, C058-C062, C121-C140) are deferred indefinitely — do NOT implement them unless the career plan is revised.
+
+**Implementation specs** (`Base-on-C032-Focus-Career/`) — self-contained, extracted from Principle/ for each P0/P1 stage:
+
+| Phase | File | Stages | Content |
+|---|---|---|---|
+| 1: 单 GPU 生产级 | `Phase1-Single-GPU.md` | C035, C036, C037, C038, C051, C052, C054c, C048, C054, C050, C069 | 11 P0 stages: BlockHashToBlockMap, SchedulerInterface ABC, Priority scheduling, Preemption, KVCacheMetricsCollector, ColumnParallel/RowParallel, VllmConfig |
+| 2: 分布式 Runtime + MultiprocExecutor | `Phase2-Distributed.md` | C083, C080, C081, C082, C084, C085, C086 | 7 P0 stages: initialize_model_parallel + GroupCoordinator, MultiprocExecutor, FusedMoE + FusedMoERouter, EP All-to-All, PPHandler, Ring Attention, Multi-GPU integration |
+| 3: 集群 + KV 传输 | `Phase3-Cluster-KV.md` | C091, C092, C093, C102 | 4 P0 stages: RayDistributedExecutor, K8s deployment, AutoscalingController, KVConnectorBase_V1 (start_load_kv/save_kv_layer) |
+| 4: 收敛验证 | `Phase4-Convergence.md` | C107, C098 | 2 P0 stages |
+| 选修 | `P1-Optional.md` | C039-C042, C053, C054b, C068, C070, C100-C101, C103, C118, C120 | 13 P1 stages |
+
+Each spec includes: goal, files to modify/create, core implementation skeleton, industrial motivation, dependencies, verification, and AGENTS.md update. **Use these as the primary implementation reference** — consult Principle/ only for deeper context.
 
 ## Reference codebase
 
 The real vLLM V1 source lives at `/home/kasw/文档/GitHub/GPU-Project/vllm`.
-The **Principle design doc for each stage** determines how closely to reference it:
+The **Phase implementation spec** for each stage determines which vLLM APIs to extract:
 
-- **Production features** (C033–C050, C081–C086): match vLLM API signatures,
-  class hierarchies, and data structures as closely as practical.
-- **Education-only** (C050b, C062b, C063b, C104–C111, C121–C140):
-  reference vLLM for understanding, but implement simplified/educational versions.
-- **Analysis chapters** (C090, C104–C111): directly analyze vLLM source code.
+- **P0 stages**: match vLLM class names, method names, dataclass fields, and file paths as closely as practical. Educational simplifications (fewer fields, smaller scope) are permitted, but **no invented API names**.
+- **P1 stages**: implement simplified/educational versions or write analysis docs only.
+- **P2 stages**: intentionally skipped — do NOT implement.
 
-When in doubt, the Principle design doc is authoritative — it specifies
-whether to port, simplify, or analyze.
+**Path mapping**: Educational project `my_vllm/v1/distributed/` → real vLLM `vllm/distributed/` (top-level). `my_vllm/v1/model_executor/` → `vllm/model_executor/` (top-level). Translate paths when reading real source.
 
 ## Before EVERY code modification:
 
 - Re-read `Principle/Commit-Standard.md`
-- Read the matching Principle design doc for the target stage
+- Read the matching phase implementation spec in `Base-on-C032-Focus-Career/` for the target stage
+- Check `Base-on-C032-Focus-Career/README.md` for the stage's priority (P0/P1/P2)
+- If P2: **do NOT implement** — skip to next P0 or P1 stage
+- For deeper context, consult the matching Principle design doc
 - Reference `/home/kasw/文档/GitHub/GPU-Project/vllm` at the depth specified
   in `## Reference codebase` for this stage's range
 - If the doc contains an `## AGENTS.md update` section, apply those changes to AGENTS.md in the same commit
@@ -133,7 +157,7 @@ whether to port, simplify, or analyze.
 4. Tag with `Cxxx-description` (e.g. `git tag C033-kernel`)
 5. Never modify earlier stages' code; if a fix is needed, create a new fix commit
 6. See `Principle/Commit-Standard.md` for the full rules
-7. Read the matching `Principle/CXXX-CYYY/` design doc for stage-specific requirements
+7. Read the matching phase implementation spec in `Base-on-C032-Focus-Career/` and the corresponding `Principle/CXXX-CYYY/` design doc for stage-specific requirements
 8. If the design doc has `## AGENTS.md update`, apply those changes and include AGENTS.md in the commit
 9. After commit, output: commit message, file diff summary, file tree,
    architecture diagram (mermaid), capabilities, limitations,
@@ -142,6 +166,7 @@ whether to port, simplify, or analyze.
 ## Key architecture facts
 
 - EngineCore `step()` = `schedule() → execute_model() → update_from_output()`
+- Model loading chain: `Executor._init_executor() → Worker.init_device() → GPUModelRunner.load_model()` — matching vLLM's deep loading architecture (model is loaded inside the runner, not passed in from the entry point)
 - KV cache is physical-block-based (BlockPool + FreeKVCacheBlockQueue, doubly-linked, O(1) alloc)
 - Prefix caching uses `cached_block_hash_to_block` dict on BlockPool
 - Chunked prefill splits long prompts by `token_budget` at the Scheduler level

@@ -9,6 +9,8 @@ C020: RequestState replaces Python dicts for per-request state.
 C022: builds CommonAttentionMetadata from InputBatch + BlockTables.
 C023: physical KV cache pool replaces HF past_key_values.
 C024: Sampler (nn.Module) replaces greedy_sample() function.
+C032: model loading moved inside load_model() — Worker no longer
+receives pre-loaded model from outside.
 """
 
 import torch
@@ -21,6 +23,7 @@ from my_vllm.v1.attention.backends.ops.paged_attn import (
     reshape_and_cache_pytorch,
 )
 from my_vllm.v1.core.sched.output import SchedulerOutput
+from my_vllm.v1.model_executor.model_loader import load_model
 from my_vllm.v1.outputs import ModelRunnerOutput
 from my_vllm.v1.sample.metadata import SamplingMetadata
 from my_vllm.v1.sample.sampler import Sampler
@@ -29,10 +32,16 @@ from my_vllm.v1.worker.gpu.states import RequestState
 
 
 class GPUModelRunner:
+    """Batched model executor — mirrors vLLM V1 GPUModelRunner.
+
+    C032: receives EngineConfig and loads model internally via
+    load_model(), matching vLLM's model lifecycle architecture.
+    """
+
     def __init__(
         self,
-        model: nn.Module,
-        device: torch.device,
+        model_name: str,
+        dtype_str: str = "bfloat16",
         eos_token_id: int = 2,
         block_size: int = 16,
         max_num_reqs: int = 64,
@@ -40,54 +49,72 @@ class GPUModelRunner:
         max_num_batched_tokens: int = 4096,
         max_model_len: int = 4096,
     ):
-        self.model = model
-        self.device = device
+        self.model_name = model_name
+        self.dtype_str = dtype_str
         self.eos_token_id = eos_token_id
         self.block_size = block_size
         self.max_num_blocks = max_num_blocks
 
-        config = model.config
-        num_layers = config.num_hidden_layers
-        num_kv_heads = getattr(
-            config, "num_key_value_heads", config.num_attention_heads
-        )
-        head_dim = config.hidden_size // config.num_attention_heads
-        dtype = next(model.parameters()).dtype
+        self.model: nn.Module | None = None
+        self.device: torch.device | None = None
+        self.num_layers: int = 0
+        self.num_kv_heads: int = 0
+        self.head_dim: int = 0
+        self.dtype: torch.dtype = torch.float32
 
-        self.num_layers = num_layers
-        self.num_kv_heads = num_kv_heads
-        self.head_dim = head_dim
-        self.dtype = dtype
-
-        # C024: Sampler (nn.Module) — replaces greedy_sample()
         self.sampler = Sampler()
+        self.attn_backend_cls = get_attn_backend()
+        self.attn_metadata: CommonAttentionMetadata | None = None
 
-        # C023: physical KV cache pool
-        self.kv_cache_k = torch.zeros(
-            num_layers, max_num_blocks, num_kv_heads, block_size, head_dim,
-            dtype=dtype, device=device,
-        )
-        self.kv_cache_v = torch.zeros(
-            num_layers, max_num_blocks, num_kv_heads, block_size, head_dim,
-            dtype=dtype, device=device,
-        )
-
-        self.request_state = RequestState(
-            max_num_reqs=max_num_reqs,
-            max_model_len=max_model_len,
-            device=device,
-        )
-
-        self.block_tables = BlockTables(
-            block_size=block_size,
+        self._init_kwargs = dict(
             max_num_reqs=max_num_reqs,
             max_num_blocks=max_num_blocks,
             max_num_batched_tokens=max_num_batched_tokens,
-            device=device,
+            max_model_len=max_model_len,
         )
 
-        self.attn_backend_cls = get_attn_backend()
-        self.attn_metadata: CommonAttentionMetadata | None = None
+    def load_model(self) -> None:
+        """Load model internally — mirrors vLLM GPUModelRunner.load_model().
+
+        Called by Worker.init_device() during executor initialization.
+        The model is loaded deep inside the ModelRunner, not passed in
+        from run.py.
+        """
+        model = load_model(self.model_name, dtype=self.dtype_str)
+        self.model = model
+        self.device = next(model.parameters()).device
+
+        config = model.config
+        self.num_layers = config.num_hidden_layers
+        self.num_kv_heads = getattr(
+            config, "num_key_value_heads", config.num_attention_heads
+        )
+        self.head_dim = config.hidden_size // config.num_attention_heads
+        self.dtype = next(model.parameters()).dtype
+
+        self.request_state = RequestState(
+            max_num_reqs=self._init_kwargs["max_num_reqs"],
+            max_model_len=self._init_kwargs["max_model_len"],
+            device=self.device,
+        )
+        self.block_tables = BlockTables(
+            block_size=self.block_size,
+            max_num_reqs=self._init_kwargs["max_num_reqs"],
+            max_num_blocks=self._init_kwargs["max_num_blocks"],
+            max_num_batched_tokens=self._init_kwargs["max_num_batched_tokens"],
+            device=self.device,
+        )
+
+        self.kv_cache_k = torch.zeros(
+            self.num_layers, self.max_num_blocks, self.num_kv_heads,
+            self.block_size, self.head_dim,
+            dtype=self.dtype, device=self.device,
+        )
+        self.kv_cache_v = torch.zeros(
+            self.num_layers, self.max_num_blocks, self.num_kv_heads,
+            self.block_size, self.head_dim,
+            dtype=self.dtype, device=self.device,
+        )
 
     def execute_model(
         self, scheduler_output: SchedulerOutput
