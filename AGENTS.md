@@ -163,6 +163,42 @@ The **Phase implementation spec** for each stage determines which vLLM APIs to e
    architecture diagram (mermaid), capabilities, limitations,
    benchmark (skip if no performance code — see Commit-Standard rule 7)
 
+## Implementation workflow (per-commit execution sequence)
+
+When implementing a new stage, follow this exact sequence:
+
+1. **Read specs (3 sources)**
+   - `Base-on-C032-Focus-Career/PhaseX-*.md` — primary implementation spec
+   - `Principle/CXXX-CYYY/CXXX-CYYY.md` — deeper industrial context
+   - `/home/kasw/文档/GitHub/GPU-Project/vllm` — real vLLM source for API verification
+
+2. **Implement**
+   - Create/modify only the files listed in the Phase spec
+   - Match vLLM class names, method names, dataclass field names exactly
+   - Never invent API names (e.g. no `MoELayer`, use `FusedMoE`)
+
+3. **Verify runnability**
+   - `python run.py` or `pytest tests/` must pass before committing
+
+4. **Commit**
+   - `git add` only intended files — never commit secrets, .venv, or __pycache__
+   - `git commit -m "Cxxx: Module: Description"`
+   - Create `docs/snapshots/Cxxx.md` in the same commit
+
+5. **Tag**
+   - `git tag Cxxx-description`
+
+6. **Output summary** (in terminal after each commit)
+   - Commit message
+   - Modified/added file list
+   - Current file tree
+   - Runtime flow (mermaid diagram)
+   - Current capabilities and limitations
+   - Benchmark results (skip if no performance code change)
+
+7. **Stop** — await human confirmation before proceeding to next stage.
+   The project never auto-advances to the next commit without explicit instruction.
+
 ## Key architecture facts
 
 - EngineCore `step()` = `schedule() → execute_model() → update_from_output()`
