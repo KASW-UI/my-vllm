@@ -12,6 +12,7 @@ import torch.distributed as dist
 
 
 _TP: "GroupCoordinator | None" = None
+_PP: "GroupCoordinator | None" = None
 
 
 class GroupCoordinator:
@@ -94,8 +95,35 @@ class GroupCoordinator:
         dist.broadcast(input_, src=self.ranks[src], group=self.device_group)
         return input_
 
+    def broadcast_object(self, obj: object = None, src: int = 0) -> object:
+        """Broadcast a Python object via CPU group."""
+        if self.world_size == 1:
+            return obj
+        if self.rank_in_group == src:
+            dist.broadcast_object_list([obj], src=self.ranks[src], group=self.cpu_group)
+            return obj
+        recv = [None]
+        dist.broadcast_object_list(recv, src=self.ranks[src], group=self.cpu_group)
+        return recv[0]
+
     def barrier(self) -> None:
         dist.barrier(group=self.cpu_group)
+
+    def send(self, tensor: torch.Tensor, dst: int) -> None:
+        """NCCL p2p send."""
+        if self.world_size <= 1:
+            return
+        dist.send(tensor, dst=self.ranks[dst], group=self.device_group)
+
+    def recv(
+        self, size: torch.Size, dtype: torch.dtype, src: int
+    ) -> torch.Tensor:
+        """NCCL p2p recv."""
+        if self.world_size <= 1:
+            return torch.empty(size, dtype=dtype, device=self.device)
+        tensor = torch.empty(size, dtype=dtype, device=self.device)
+        dist.recv(tensor, src=self.ranks[src], group=self.device_group)
+        return tensor
 
     def destroy(self) -> None:
         if hasattr(self, "device_group"):
@@ -158,6 +186,10 @@ def initialize_model_parallel(
 def get_tp_group() -> GroupCoordinator:
     assert _TP is not None, "tensor model parallel group is not initialized"
     return _TP
+
+
+def get_pp_group() -> "GroupCoordinator | None":
+    return _PP
 
 
 def get_tp_world_size() -> int:
