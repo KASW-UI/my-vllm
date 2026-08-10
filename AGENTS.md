@@ -46,7 +46,7 @@ my_vllm/v1/
   sample/          # Sampler (nn.Module), LogitsProcessor
   model_executor/  # model_loader, layers/linear (TP), models/opt
   distributed/     # parallel_state (TP, world_size=1 identity)
-  metrics/         # collector
+  metrics/         # collector, stats (SchedulerStats, IterationStats), loggers, prometheus — TTFT, TPOT, ITL, throughput, KV utilization
   request.py       # Request dataclass (11 statuses)
   outputs.py       # SamplerOutput, ModelRunnerOutput, EngineCoreOutput(s)
   utils.py         # ConstantList
@@ -213,6 +213,7 @@ When implementing a new stage, follow this exact sequence:
 - Sampler is an `nn.Module` subclass with penalties → temperature → top-k → top-p → sampling
 - Tensor parallel stubs degrade to identity when `world_size=1`
 - KVCacheSpec hierarchy: FullAttentionSpec (packed K/V, head_size_v), SlidingWindowSpec (swa window), MLAAttentionSpec (cache_dtype_str), 聚合类型 KVCacheGroupSpec 将同 typespec 层分组
+- Metrics: TTFT, TPOT, ITL, throughput, KV cache utilization
 
 ## Model dependency
 
