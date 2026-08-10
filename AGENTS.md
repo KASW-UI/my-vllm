@@ -36,7 +36,7 @@ There is no CI, no lint, no formatter, no typecheck configured.
 
 ```
 my_vllm/v1/
-  config.py        # EngineConfig
+  config/          # VllmConfig, ModelConfig, CacheConfig, SchedulerConfig
   engine/          # EngineCore, LLMEngine, AsyncLLM, I/O processors, detokenizer
     core/sched/      # Scheduler, SchedulerInterface, SchedulerOutput, request_queue (SchedulingPolicy, FCFSRequestQueue, PriorityRequestQueue, create_request_queue)
     core/            # BlockPool, KVCacheManager, kv_cache_utils
@@ -79,10 +79,10 @@ my_vllm/metrics/       # bridge → v1/metrics/collector
 
 ## Configuration
 
-`my_vllm/v1/config.py` — `EngineConfig` dataclass. Defaults:
-- model: `facebook/opt-125m` (local at `/home/kasw/文档/GitHub/cpu-vllm/opt-125m`)
-- dtype: `bfloat16`, block_size: `16`, num_kv_blocks: `512`, max_running: `8`
-- enforce_eager: `True`, max_new_tokens: `50`, eos_token_id: `2`
+`my_vllm/v1/config/` — `VllmConfig` aggregates `ModelConfig`, `CacheConfig`, `SchedulerConfig`. Defaults:
+- model: `facebook/opt-125m`, dtype: `bfloat16`, block_size: `16`, num_kv_blocks: `512`, max_num_seqs: `8`
+- enforce_eager: `True`, max_num_batched_tokens: `2048`, eos_token_id: `2`
+- `v1/config.py` re-exports `EngineConfig` for backward compat.
 
 ## Design documents (Principle/)
 
