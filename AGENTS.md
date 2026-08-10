@@ -211,7 +211,7 @@ When implementing a new stage, follow this exact sequence:
 - Chunked prefill splits long prompts by `token_budget` at the Scheduler level
 - PagedAttention ops are pure PyTorch (`reshape_and_cache_pytorch`, `gather_cached_kv_pytorch`)
 - Sampler is an `nn.Module` subclass with penalties → temperature → top-k → top-p → sampling
-- Tensor parallel stubs degrade to identity when `world_size=1`
+- Tensor parallel: TP=2: ColumnParallelLinear (all_gather) + RowParallelLinear (all_reduce), 内联 torch.distributed 调用
 - KVCacheSpec hierarchy: FullAttentionSpec (packed K/V, head_size_v), SlidingWindowSpec (swa window), MLAAttentionSpec (cache_dtype_str), 聚合类型 KVCacheGroupSpec 将同 typespec 层分组
 - Metrics: TTFT, TPOT, ITL, throughput, KV cache utilization
 - KV Metrics: KVCacheMetricsCollector, BlockMetricsState — reuse interval, residency, eviction count, prefix cache hit rate
