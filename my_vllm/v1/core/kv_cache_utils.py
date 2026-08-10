@@ -8,6 +8,12 @@ with O(1) LRU-aware allocation and eviction.
 """
 
 from dataclasses import dataclass
+from typing import NamedTuple
+
+
+class KVCacheBlockCopy(NamedTuple):
+    src_block_id: int
+    dst_block_id: int
 
 
 @dataclass

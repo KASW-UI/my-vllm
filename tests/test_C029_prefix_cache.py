@@ -47,7 +47,7 @@ class TestBlockPoolCache:
         blocks = pool.get_new_blocks(1)
         b = blocks[0]
         b.set_block_hash(b"test")
-        pool.cached_block_hash_to_block[b"test"] = b
+        pool.cached_block_hash_to_block.insert(b"test", b)
         assert pool.get_cached_block(b"test") is b
 
     def test_free_removes_from_cache(self):
@@ -55,7 +55,7 @@ class TestBlockPoolCache:
         blocks = pool.get_new_blocks(1)
         b = blocks[0]
         b.set_block_hash(b"myhash")
-        pool.cached_block_hash_to_block[b"myhash"] = b
+        pool.cached_block_hash_to_block.insert(b"myhash", b)
         assert pool.get_cached_block(b"myhash") is b
         pool.free_blocks([b])
         assert pool.get_cached_block(b"myhash") is None
