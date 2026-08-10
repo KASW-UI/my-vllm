@@ -7,7 +7,10 @@ C030: chunked prefill — long prompts split by token_budget;
 C037: implements SchedulerInterface ABC for standardized contract.
 C038: resource model — explicit GPU/KV/token budget checks.
 C051: multi-policy scheduling — FCFS/Priority via SchedulingPolicy.
+C052: preemption — RECOMPUTE/SWAP victim selection + KV reclaim.
 """
+
+from enum import Enum
 
 from my_vllm.v1.core.kv_cache_manager import KVCacheManager
 from my_vllm.v1.core.sched.interface import SchedulerInterface
@@ -24,10 +27,16 @@ from my_vllm.v1.outputs import EngineCoreOutputs, ModelRunnerOutput
 from my_vllm.v1.request import Request, RequestStatus
 
 
+class PreemptionMode(Enum):
+    RECOMPUTE = "recompute"
+    SWAP = "swap"
+
+
 class Scheduler(SchedulerInterface):
     """Multi-policy scheduler with chunked prefill, prefix cache, resource model.
 
     C051: policy parameter selects FCFS or Priority scheduling.
+    C052: preemption (RECOMPUTE/SWAP) reclaims resources from low-priority requests.
     """
 
     def __init__(
@@ -36,6 +45,7 @@ class Scheduler(SchedulerInterface):
         kv_cache_manager: KVCacheManager | None = None,
         max_num_batched_tokens: int = 2048,
         policy: SchedulingPolicy = SchedulingPolicy.FCFS,
+        preemption_mode: PreemptionMode = PreemptionMode.RECOMPUTE,
     ):
         self.scheduling_policy = policy
         self.waiting = create_request_queue(policy)
@@ -43,6 +53,7 @@ class Scheduler(SchedulerInterface):
         self.max_running = max_running
         self.kv_cache_manager = kv_cache_manager
         self.max_num_batched_tokens = max_num_batched_tokens
+        self.preemption_mode = preemption_mode
 
     def add_request(self, request: Request):
         request.status = RequestStatus.WAITING
@@ -53,6 +64,7 @@ class Scheduler(SchedulerInterface):
         new_req_datas: list[NewRequestData] = []
         new_blocks: dict[str, list[int]] = {}
         num_common_prefix_blocks: list[int] = []
+        preempted_req_ids: set[str] = set()
 
         # C030: handle running requests that still need prefill (chunk continue)
         for req in self.running:
@@ -70,7 +82,6 @@ class Scheduler(SchedulerInterface):
                 req.num_computed_tokens < len(req.prompt_token_ids)
             )
 
-            # KV budget: allocate additional blocks for chunked tokens
             if self.kv_cache_manager is not None:
                 blocks = self.kv_cache_manager.allocate_slots(
                     req, req.num_computed_tokens
@@ -90,7 +101,8 @@ class Scheduler(SchedulerInterface):
         # Pull new requests from waiting queue
         while self.waiting:
             if not self._has_gpu_budget():
-                break
+                if not self._try_preempt_for_gpu_budget(preempted_req_ids):
+                    break
             if not self._has_token_budget(token_budget):
                 break
 
@@ -110,8 +122,17 @@ class Scheduler(SchedulerInterface):
                     req, prompt_len
                 )
                 if not self._has_kv_budget(blocks):
-                    self.waiting.prepend_request(req)
-                    break
+                    if not self._try_preempt_for_kv_budget(
+                        req, prompt_len, preempted_req_ids
+                    ):
+                        self.waiting.prepend_request(req)
+                        break
+                    blocks = self.kv_cache_manager.allocate_slots(
+                        req, prompt_len
+                    )
+                    if not self._has_kv_budget(blocks):
+                        self.waiting.prepend_request(req)
+                        break
                 new_blocks[req.request_id] = list(blocks.block_ids)
 
             # C030: chunk if remaining > token_budget
@@ -135,14 +156,17 @@ class Scheduler(SchedulerInterface):
             num_common_prefix_blocks.append(n_prefix_blocks)
 
         cached_data = CachedRequestData(
-            req_ids=[r.request_id for r in self.running],
+            req_ids=[r.request_id for r in self.running
+                     if r.status != RequestStatus.PREEMPTED],
             num_computed_tokens={
                 r.request_id: r.num_computed_tokens
                 for r in self.running
+                if r.status != RequestStatus.PREEMPTED
             },
             num_output_tokens={
                 r.request_id: r.num_output_tokens
                 for r in self.running
+                if r.status != RequestStatus.PREEMPTED
             },
         )
 
@@ -157,8 +181,66 @@ class Scheduler(SchedulerInterface):
             num_scheduled_tokens={},
             total_num_scheduled_tokens=total_tokens,
             finished_req_ids=set(),
+            preempted_req_ids=preempted_req_ids or None,
             num_common_prefix_blocks=num_common_prefix_blocks,
         )
+
+    # --- C052 preemption ---
+
+    def _select_preemption_victims(self) -> list[Request]:
+        """Select preemptible running requests sorted by priority (lowest first)."""
+        candidates = [r for r in self.running
+                       if r.status == RequestStatus.RUNNING]
+        candidates.sort(key=lambda r: r.priority)
+        return candidates
+
+    def _preempt(self, victim: Request) -> None:
+        """Preempt a single request — free KV blocks, set PREEMPTED."""
+        if self.preemption_mode == PreemptionMode.RECOMPUTE:
+            if self.kv_cache_manager is not None:
+                self.kv_cache_manager.free(victim.request_id)
+            victim.num_computed_tokens = 0
+        elif self.preemption_mode == PreemptionMode.SWAP:
+            victim.is_preempted_swapped = True
+        victim.status = RequestStatus.PREEMPTED
+        self.running.remove(victim)
+        self.waiting.prepend_request(victim)
+
+    def _try_preempt_for_gpu_budget(
+        self, preempted_ids: set[str]
+    ) -> bool:
+        """Preempt one victim to free a GPU slot."""
+        if not self.running:
+            return False
+        victims = self._select_preemption_victims()
+        if not victims:
+            return False
+        self._preempt(victims[0])
+        preempted_ids.add(victims[0].request_id)
+        return True
+
+    def _try_preempt_for_kv_budget(
+        self, request: Request, prompt_len: int,
+        preempted_ids: set[str],
+    ) -> bool:
+        """Preempt victims until enough KV blocks are free for the request.
+
+        After each preemption, try allocating again to check progress.
+        """
+        if not self.running or self.kv_cache_manager is None:
+            return False
+        victims = self._select_preemption_victims()
+        for victim in victims:
+            if victim.priority >= request.priority:
+                continue
+            self._preempt(victim)
+            preempted_ids.add(victim.request_id)
+            blocks = self.kv_cache_manager.allocate_slots(
+                request, prompt_len
+            )
+            if blocks is not None:
+                return True
+        return False
 
     # --- C038 resource budget checks ---
 

@@ -75,6 +75,7 @@ class Request:
         self.num_computed_tokens: int = 0
         self.num_preemptions: int = 0
         self.block_hashes: list[bytes] = []
+        self.is_preempted_swapped: bool = False
 
         self._output_token_ids: list[int] = []
         self._all_token_ids: list[int] = list(self.prompt_token_ids)
