@@ -4,7 +4,16 @@
 
 This is an **educational simulation** of the vLLM V1 serving runtime. Each Git commit represents one architectural evolution stage (C001→C098 planned), in sequence. The Git history itself is the curriculum — **never squash or rebase**. Every commit has a matching `docs/snapshots/Cxxx.md` and a Git tag.
 
-**Current baseline**: C032 (`C032-cleanup` tag). C033 and C034 were implemented on an unmerged branch and are **abandoned (废案)**. A model-loading architecture fix was applied post-C032 to align with vLLM's deep loading chain (Executor → Worker → GPUModelRunner). Future work starts from this baseline following the career-focused plan at `Base-on-C032-Focus-Career/README.md`.
+**Current baseline**: C032 (`C032-cleanup` tag). C033 and C034 were implemented on an unmerged branch and are **abandoned (废案)**. 
+
+**Current status**: All 24 P0 stages (C035→C098) are implemented across 4 phases:
+- Phase 1 (single-GPU production): C035, C036, C037, C038, C051, C052, C054c, C048, C054, C050, C069 — complete
+- Phase 2 (distributed runtime): C083, C080, C081, C082, C084, C085, C086 — complete
+- Phase 3 (cluster + KV transfer): C091, C092, C093, C102 — complete
+- Phase 4 (convergence): C107, C098 — complete
+- 13 P1 stages intentionally deferred; 61 P2 stages intentionally skipped.
+
+Future work starts from this baseline following the career-focused plan at `Base-on-C032-Focus-Career/README.md`.
 
 Architecture reference: `C014-Final.md` at repo root.
 
