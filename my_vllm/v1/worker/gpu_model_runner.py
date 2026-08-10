@@ -38,20 +38,29 @@ if TYPE_CHECKING:
     from my_vllm.config.vllm import VllmConfig
 
 
+def _str_to_torch_dtype(dtype_str: str) -> torch.dtype:
+    return {
+        "float16": torch.float16,
+        "bfloat16": torch.bfloat16,
+        "float32": torch.float32,
+    }.get(dtype_str, torch.float32)
+
+
 class GPUModelRunner:
     """Batched model executor — mirrors vLLM V1 GPUModelRunner.
 
     Receives VllmConfig + device, matching real vLLM's constructor pattern.
     """
 
-    def __init__(self, vllm_config: VllmConfig, device: torch.device | None = None):
+    _EOS_TOKEN_ID = 2
+
+    def __init__(self, vllm_config: VllmConfig, device: torch.device):
         mc = vllm_config.model_config
         cc = vllm_config.cache_config
         sc = vllm_config.scheduler_config
 
         self.model_name = mc.model_name
         self.dtype_str = mc.dtype
-        self.eos_token_id = 2
         self.block_size = cc.block_size
         self.max_num_blocks = cc.num_kv_blocks
         self.device = device
@@ -60,7 +69,7 @@ class GPUModelRunner:
         self.num_layers: int = 0
         self.num_kv_heads: int = 0
         self.head_dim: int = 0
-        self.dtype: torch.dtype = torch.float32
+        self.dtype: torch.dtype = _str_to_torch_dtype(mc.dtype)
 
         self.sampler = Sampler()
         self.attn_backend_cls = get_attn_backend()
@@ -361,7 +370,7 @@ class GPUModelRunner:
             next_token = int(sampled[i].item())
             self.request_state.set_last_sampled_token(rid, next_token)
 
-            if next_token == self.eos_token_id:
+            if next_token == self._EOS_TOKEN_ID:
                 results[rid] = None
             else:
                 results[rid] = next_token

@@ -37,7 +37,7 @@ class EngineCoreOutputs:
     """Aggregated output from scheduler.update_from_output().
 
     Mirrors vLLM V1 v1/engine/__init__.py:EngineCoreOutputs (simplified).
+    Contains per-request EngineCoreOutput objects (not raw token dicts).
     """
 
-    finished_requests: list = field(default_factory=list)
-    sampled_token_ids: dict[str, list[int]] = field(default_factory=dict)
+    outputs: list[EngineCoreOutput] = field(default_factory=list)

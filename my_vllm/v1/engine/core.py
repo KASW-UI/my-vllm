@@ -10,7 +10,7 @@ from my_vllm.v1.core.block_pool import BlockPool
 from my_vllm.v1.core.kv_cache_manager import KVCacheManager
 from my_vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from my_vllm.v1.core.sched.scheduler import Scheduler
-from my_vllm.v1.engine.output_processor import OutputProcessor, RequestOutput
+from my_vllm.v1.engine import EngineCoreOutputs
 from my_vllm.v1.executor.abstract import Executor
 from my_vllm.v1.metrics.loggers import LoggingStatLogger, StatLoggerBase
 from my_vllm.v1.metrics.stats import (
@@ -39,14 +39,12 @@ class EngineCore:
         self,
         vllm_config: VllmConfig,
         executor_class: type[Executor],
-        log_stats: bool = False,
+        log_stats: bool,
     ):
         self.vllm_config = vllm_config
         cc = vllm_config.cache_config
         sc = vllm_config.scheduler_config
 
-        self.max_new_tokens = 256
-        self.eos_token_id = 2
         self.device = torch.device(
             "cuda:0" if torch.cuda.is_available() else "cpu"
         )
@@ -68,79 +66,60 @@ class EngineCore:
         )
         self.finished: list[Request] = []
 
-        self.output_processor = OutputProcessor(
-            tokenizer=None
-        )  # tokenizer injected later if needed
-
         # C048: metrics
         self._step_count: int = 0
         self._request_ttft: dict[str, float] = {}
         self._request_arrival: dict[str, float] = {}
-        self._request_last_token_ts: dict[str, float] = {}
-        self._request_generation_count: dict[str, int] = {}
         self._stat_logger: StatLoggerBase = LoggingStatLogger(interval_steps=10)
 
     def add_request(self, request: Request):
         self.scheduler.add_request(request)
         self._request_arrival[request.request_id] = request.arrival_time
-        self._request_generation_count[request.request_id] = 0
 
     def has_work(self) -> bool:
         return self.scheduler.has_work()
 
-    def step(self) -> list[RequestOutput]:
+    def step(self):
         self._step_count += 1
         step_start = time.time()
 
         scheduler_output = self.scheduler.schedule()
         if scheduler_output.total_num_scheduled_tokens == 0:
-            return []
+            return EngineCoreOutputs()
 
         model_output = self.executor.execute_model(scheduler_output)
         if model_output is None:
-            return []
+            return EngineCoreOutputs()
 
-        engine_outputs = self.scheduler.update_from_output(
+        engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output,
-            eos_token_id=self.eos_token_id,
-            max_tokens=self.max_new_tokens,
-        )
-
-        req_map = {r.request_id: r for r in self.scheduler.running}
-
-        outputs = self.output_processor.process_outputs(
-            model_output, req_map,
-            eos_token_id=self.eos_token_id,
-            max_tokens=self.max_new_tokens,
         )
 
         step_end = time.time()
 
-        for req in engine_outputs.finished_requests:
-            if req not in self.finished:
-                self._finish_request(req)
+        for eo in engine_core_outputs.outputs:
+            if eo.finish_reason is not None:
+                req = self._find_request(eo.request_id)
+                if req is not None and req not in self.finished:
+                    self._finish_request(req)
 
-        # C048: collect metrics for this iteration
         self._collect_metrics(
-            scheduler_output, model_output, outputs,
-            engine_outputs, step_start, step_end,
+            scheduler_output, model_output,
+            engine_core_outputs, step_start, step_end,
         )
 
-        return [o for o in outputs if o.finished]
+        return engine_core_outputs
 
     def _collect_metrics(
         self,
         scheduler_output,
         model_output,
-        outputs,
-        engine_outputs,
+        engine_core_outputs,
         step_start: float,
         step_end: float,
     ) -> None:
-        # Drain KV cache eviction events
         eviction_events = self._kv_metrics_collector.drain_events()
 
-        # Build SchedulerStats
         kv_usage = 1.0 - (self.kv_cache_manager.num_free_blocks /
                           self.kv_cache_manager.block_pool.num_blocks)
         cache_stats = PrefixCacheStats()
@@ -152,14 +131,12 @@ class EngineCore:
             kv_cache_eviction_events=eviction_events,
         )
 
-        # Build IterationStats
         iter_stats = IterationStats()
         num_prompt_tokens = scheduler_output.total_num_scheduled_tokens
         num_gen_tokens = sum(
             len(tokens) for tokens in model_output.sampled_token_ids
         )
 
-        # Track TTFT: first token for each request
         for i, rid in enumerate(model_output.req_ids):
             token_ids = model_output.sampled_token_ids[i]
             if rid in self._request_arrival and rid not in self._request_ttft:
@@ -168,29 +145,29 @@ class EngineCore:
                     self._request_ttft[rid] = ttft
                     iter_stats.record_first_token(ttft)
 
-        # Track ITL: consecutive token intervals
         finished: list[FinishedRequestStats] = []
-        for req in engine_outputs.finished_requests:
-            rid = req.request_id
-            n_prompt = len(req.prompt_token_ids)
-            n_gen = req.num_output_tokens
-            e2e = step_end - self._request_arrival.get(rid, step_end)
-            ttft = self._request_ttft.get(rid, 0.0)
-            tpot = (e2e - ttft) / n_gen if n_gen > 0 else 0.0
-            itl = 0.0
-            finished.append(FinishedRequestStats(
-                request_id=rid,
-                num_prompt_tokens=n_prompt,
-                num_generation_tokens=n_gen,
-                e2e_latency=e2e,
-                ttft=ttft,
-                tpot=tpot,
-                itl=itl,
-            ))
-            self._request_ttft.pop(rid, None)
-            self._request_arrival.pop(rid, None)
-            self._request_last_token_ts.pop(rid, None)
-            self._request_generation_count.pop(rid, None)
+        for eo in engine_core_outputs.outputs:
+            if eo.finish_reason is not None:
+                rid = eo.request_id
+                req = self._find_request(rid)
+                if req is None:
+                    continue
+                n_prompt = len(req.prompt_token_ids)
+                n_gen = req.num_output_tokens
+                e2e = step_end - self._request_arrival.get(rid, step_end)
+                ttft = self._request_ttft.get(rid, 0.0)
+                tpot = (e2e - ttft) / n_gen if n_gen > 0 else 0.0
+                finished.append(FinishedRequestStats(
+                    request_id=rid,
+                    num_prompt_tokens=n_prompt,
+                    num_generation_tokens=n_gen,
+                    e2e_latency=e2e,
+                    ttft=ttft,
+                    tpot=tpot,
+                    itl=0.0,
+                ))
+                self._request_ttft.pop(rid, None)
+                self._request_arrival.pop(rid, None)
 
         iter_stats.update_from_output(
             num_prompt_tokens=num_prompt_tokens,
@@ -203,10 +180,15 @@ class EngineCore:
 
         self._stat_logger.record(sched_stats, iter_stats)
 
+    def _find_request(self, request_id: str) -> Request | None:
+        for req in self.scheduler.running:
+            if req.request_id == request_id:
+                return req
+        return None
+
     def _finish_request(self, req: Request):
         rid = req.request_id
         self.kv_cache_manager.free(rid)
         self.worker.cleanup(rid)
         self.scheduler.finish(req)
-        self.output_processor.cleanup(rid)
         self.finished.append(req)

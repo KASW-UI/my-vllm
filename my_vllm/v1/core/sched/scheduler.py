@@ -25,7 +25,7 @@ from my_vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
     create_request_queue,
 )
-from my_vllm.v1.engine import EngineCoreOutputs
+from my_vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
 from my_vllm.v1.outputs import ModelRunnerOutput
 from my_vllm.v1.request import Request, RequestStatus
 
@@ -39,6 +39,9 @@ class Scheduler(SchedulerInterface):
     C051: policy parameter selects FCFS or Priority scheduling.
     C052: preempt_request frees KV blocks, resets num_computed_tokens, requeues.
     """
+
+    _EOS_TOKEN_ID = 2
+    _DEFAULT_MAX_TOKENS = 256
 
     def __init__(
         self,
@@ -301,32 +304,44 @@ class Scheduler(SchedulerInterface):
         self,
         scheduler_output: SchedulerOutput,
         model_output: ModelRunnerOutput,
-        eos_token_id: int,
-        max_tokens: int,
     ) -> EngineCoreOutputs:
-        """Detect finished requests from model output."""
-        finished: list[Request] = []
+        """Update request states from model output.
+
+        Mirrors vLLM: scheduler handles ALL EOS/length detection and
+        produces EngineCoreOutput per request with finish_reason.
+        OutputProcessor only does detokenization.
+        """
+        outputs: list[EngineCoreOutput] = []
+
         for i, rid in enumerate(model_output.req_ids):
             token_ids = model_output.sampled_token_ids[i]
             req = self._find_request(rid)
             if req is None:
                 continue
+
+            new_tokens: list[int] = []
             for tok in token_ids:
-                if tok == eos_token_id:
+                if tok == self._EOS_TOKEN_ID:
                     req.status = RequestStatus.FINISHED_STOPPED
                     break
-            limit = req.max_tokens or max_tokens
-            if req.num_output_tokens + len(token_ids) >= limit and not req.is_finished():
+                req.append_output_token_ids(tok)
+                new_tokens.append(tok)
+
+            limit = req.max_tokens or self._DEFAULT_MAX_TOKENS
+            if req.num_output_tokens >= limit and not req.is_finished():
                 req.status = RequestStatus.FINISHED_LENGTH_CAPPED
+
+            finish_reason = None
             if req.is_finished():
-                finished.append(req)
-        return EngineCoreOutputs(
-            finished_requests=finished,
-            sampled_token_ids={
-                rid: model_output.sampled_token_ids[i]
-                for i, rid in enumerate(model_output.req_ids)
-            },
-        )
+                finish_reason = RequestStatus.get_finished_reason(req.status)
+
+            outputs.append(EngineCoreOutput(
+                request_id=rid,
+                new_token_ids=new_tokens,
+                finish_reason=finish_reason,
+            ))
+
+        return EngineCoreOutputs(outputs=outputs)
 
     def _find_request(self, request_id: str) -> Request | None:
         for req in self.running:

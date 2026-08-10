@@ -1,11 +1,10 @@
-"""OutputProcessor — converts model outputs into structured RequestOutputs.
+"""OutputProcessor — converts engine outputs into structured RequestOutputs.
 
 Mirrors vLLM V1 v1/engine/output_processor.py (simplified).
 
-C025: extracts output processing from EngineCore.step() into
-a dedicated component.  Takes SchedulerOutput + ModelRunnerOutput
-and produces a list of finished Request objects with processed
-token IDs and status transitions.
+Consumes EngineCoreOutputs (already processed by Scheduler for EOS/length),
+only performs detokenization. EOS/length handling moved to
+Scheduler.update_from_output().
 """
 
 from __future__ import annotations
@@ -13,9 +12,10 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from my_vllm.v1.engine import EngineCoreOutput, EngineCoreOutputs
+
 if TYPE_CHECKING:
     from my_vllm.v1.engine.detokenizer import IncrementalDetokenizer
-    from my_vllm.v1.outputs import ModelRunnerOutput
     from my_vllm.v1.request import Request
 
 
@@ -45,13 +45,11 @@ class RequestOutput:
 
 
 class OutputProcessor:
-    """Processes model outputs into structured RequestOutput.
+    """Processes EngineCoreOutputs into structured RequestOutput.
 
     Responsibilities:
-    - Map sampled token IDs back to Request objects
-    - Detect EOS / max_tokens → mark finished
-    - Append tokens to requests
-    - Incremental detokenization via IncrementalDetokenizer
+    - Map EngineCoreOutput to Request objects
+    - Incremental detokenization (no EOS/length — handled by Scheduler)
     """
 
     def __init__(self, tokenizer=None):
@@ -65,18 +63,14 @@ class OutputProcessor:
 
     def process_outputs(
         self,
-        model_output: ModelRunnerOutput,
+        engine_core_outputs: EngineCoreOutputs,
         req_map: dict[str, Request],
-        eos_token_id: int,
-        max_tokens: int,
     ) -> list[RequestOutput]:
-        """Process model output and return per-request outputs.
+        """Process engine outputs and return per-request outputs.
 
         Args:
-            model_output: tokens sampled by the model runner
+            engine_core_outputs: processed outputs from Scheduler
             req_map: mapping request_id → Request
-            eos_token_id: EOS token ID
-            max_tokens: default max tokens per request
 
         Returns:
             List of RequestOutput, one per request that produced tokens
@@ -84,40 +78,24 @@ class OutputProcessor:
         """
         outputs: list[RequestOutput] = []
 
-        for i, rid in enumerate(model_output.req_ids):
-            token_ids = model_output.sampled_token_ids[i]
-            req = req_map.get(rid)
+        for eo in engine_core_outputs.outputs:
+            req = req_map.get(eo.request_id)
             if req is None:
                 continue
 
-            detok = self._get_detokenizer(rid)
-            appended_count = 0
+            detok = self._get_detokenizer(eo.request_id)
+            delta = detok.update(eo.new_token_ids)
 
-            for token in token_ids:
-                if token == eos_token_id:
-                    req.status = req.status.__class__.FINISHED_STOPPED
-                    break
-                req.append_output_token_ids(token)
-                appended_count += 1
-
-            new_out = req._output_token_ids[-appended_count:] if appended_count else []
-            delta = detok.update(new_out)
-            step_val = req.num_output_tokens
-            limit = req.max_tokens or max_tokens
-
-            if step_val >= limit and not req.is_finished():
-                req.status = req.status.__class__.FINISHED_LENGTH_CAPPED
-
-            is_finished = req.is_finished()
+            is_finished = eo.finish_reason is not None
 
             outputs.append(RequestOutput(
-                request_id=rid,
+                request_id=eo.request_id,
                 prompt_text=self._decode(req.prompt_token_ids),
                 output_text=detok.full_text(),
                 delta_text=delta,
                 output_tokens=req.num_output_tokens,
                 prompt_tokens=len(req.prompt_token_ids),
-                finish_reason=req.status.name if is_finished else "",
+                finish_reason=eo.finish_reason.name if eo.finish_reason is not None else "",
                 finished=is_finished,
                 token_ids=detok.token_ids,
             ))

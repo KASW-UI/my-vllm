@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from my_vllm.v1.engine.core import EngineCore
 from my_vllm.v1.engine.input_processor import InputProcessor
-from my_vllm.v1.engine.output_processor import RequestOutput
+from my_vllm.v1.engine.output_processor import OutputProcessor, RequestOutput
 from my_vllm.v1.executor.abstract import Executor
 from my_vllm.v1.request import Request
 
@@ -25,7 +25,9 @@ class LLMEngine:
 
     Mirrors vLLM V1 v1/engine/llm_engine.py:48 (simplified).
 
-    Receives VllmConfig + executor_class, creates EngineCore internally.
+    Receives VllmConfig + executor_class + tokenizer.
+    Owns EngineCore + OutputProcessor internally.
+    step() flow: EngineCore.step() → EngineCoreOutputs → OutputProcessor.process_outputs() → list[RequestOutput]
     """
 
     def __init__(
@@ -38,12 +40,14 @@ class LLMEngine:
         self._engine_core = EngineCore(
             vllm_config=vllm_config,
             executor_class=executor_class,
+            log_stats=False,
         )
+        self._output_processor = OutputProcessor(tokenizer)
         self._pending: dict[str, Request] = {}
 
         self._input_processor = InputProcessor(
             tokenizer,
-            default_max_tokens=self._engine_core.max_new_tokens,
+            default_max_tokens=256,
         )
 
     def add_request(
@@ -59,7 +63,21 @@ class LLMEngine:
     def step(self) -> list[dict]:
         """Run one scheduling + execution step and return finished outputs."""
         results: list[dict] = []
-        outputs: list[RequestOutput] = self._engine_core.step()
+        engine_core_outputs = self._engine_core.step()
+
+        req_map = {
+            r.request_id: r
+            for r in self._engine_core.scheduler.running
+        }
+
+        outputs = self._output_processor.process_outputs(
+            engine_core_outputs, req_map,
+        )
+
+        for eo in engine_core_outputs.outputs:
+            if eo.finish_reason is not None:
+                self._output_processor.cleanup(eo.request_id)
+
         for out in outputs:
             prompt_text = out.prompt_text
             if not prompt_text and out.request_id in self._pending:
