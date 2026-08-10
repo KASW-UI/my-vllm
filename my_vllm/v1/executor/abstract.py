@@ -42,9 +42,9 @@ class Executor(ABC):
             Executor subclass to instantiate.
         """
         if backend == "mp":
-            from my_vllm.v1.executor.uniproc_executor import UniProcExecutor
+            from my_vllm.v1.executor.multiproc_executor import MultiprocExecutor
 
-            return UniProcExecutor
+            return MultiprocExecutor
 
         from my_vllm.v1.executor.uniproc_executor import UniProcExecutor
 

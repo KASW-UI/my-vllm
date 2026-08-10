@@ -41,7 +41,7 @@ my_vllm/v1/
     core/sched/      # Scheduler, SchedulerInterface, SchedulerOutput, request_queue (SchedulingPolicy, FCFSRequestQueue, PriorityRequestQueue, create_request_queue)
     core/            # BlockPool, KVCacheManager, kv_cache_utils
   worker/          # Worker, GPUModelRunner, physical KV cache pool
-  executor/        # ABC + UniProcExecutor
+  executor/        # ABC, UniProcExecutor, MultiprocExecutor
   attention/       # BackendABC, CommonAttentionMetadata, backends/ops/paged_attn.py
   sample/          # Sampler (nn.Module), LogitsProcessor
   model_executor/  # model_loader, layers/linear (TP), models/opt
@@ -204,6 +204,7 @@ When implementing a new stage, follow this exact sequence:
 - EngineCore `step()` = `schedule() → execute_model() → update_from_output()`
 - SchedulerInterface ABC: schedule() → SchedulerOutput, update_from_output(), finish_requests()
 - Model loading chain: `Executor._init_executor() → Worker.init_device() → GPUModelRunner.load_model()` — matching vLLM's deep loading architecture (model is loaded inside the runner, not passed in from the entry point)
+- MultiprocExecutor: Worker Process per GPU, 替代 UniProcExecutor 支持多进程并行
 - KV cache is physical-block-based (BlockPool + FreeKVCacheBlockQueue, doubly-linked, O(1) alloc)
 - Prefix caching uses BlockHashToBlockMap (hash→list[block]), free_blocks() with ref_cnt cascading release, GC 驱逐逻辑, CoW: shared blocks copied on write (ref_cnt > 1 → copy → decrement → private block), KVCacheBlockCopy via SchedulerOutput.kv_cache_block_copies
 - Scheduler: FCFS + Priority scheduling + chunked-prefill + prefix-cache aware + resource model (GPU budget, KV budget, token budget) + Preemption
