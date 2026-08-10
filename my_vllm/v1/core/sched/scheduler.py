@@ -4,9 +4,11 @@ C016: migrated from scheduler/scheduler.py.
 C029: prefix cache lookup via KVCacheManager.get_computed_blocks().
 C030: chunked prefill — long prompts split by token_budget;
       num_computed_tokens tracks prefill progress per-chunk.
+C037: implements SchedulerInterface ABC for standardized contract.
 """
 
 from my_vllm.v1.core.kv_cache_manager import KVCacheManager
+from my_vllm.v1.core.sched.interface import SchedulerInterface
 from my_vllm.v1.core.sched.output import (
     CachedRequestData,
     NewRequestData,
@@ -17,7 +19,7 @@ from my_vllm.v1.outputs import EngineCoreOutputs, ModelRunnerOutput
 from my_vllm.v1.request import Request, RequestStatus
 
 
-class Scheduler:
+class Scheduler(SchedulerInterface):
     """FCFS scheduler with chunked prefill (C030).
 
     max_num_batched_tokens limits per-step prefill tokens.
@@ -157,6 +159,24 @@ class Scheduler:
 
     def has_work(self) -> bool:
         return bool(self.waiting) or bool(self.running)
+
+    def has_unfinished_requests(self) -> bool:
+        return self.has_work()
+
+    def get_num_unfinished_requests(self) -> int:
+        return len(self.waiting) + len(self.running)
+
+    def finish_requests(
+        self, request_ids: list[str], finished_status: RequestStatus
+    ) -> list[Request]:
+        finished: list[Request] = []
+        for rid in request_ids:
+            req = self._find_request(rid)
+            if req is not None:
+                req.status = finished_status
+                self.finish(req)
+                finished.append(req)
+        return finished
 
     def update_from_output(
         self,

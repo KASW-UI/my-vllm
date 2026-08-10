@@ -38,7 +38,7 @@ There is no CI, no lint, no formatter, no typecheck configured.
 my_vllm/v1/
   config.py        # EngineConfig
   engine/          # EngineCore, LLMEngine, AsyncLLM, I/O processors, detokenizer
-  core/sched/      # Scheduler (FCFS, chunked-prefill, prefix-cache aware)
+  core/sched/      # Scheduler, SchedulerInterface, SchedulerOutput, FCFSRequestQueue
   core/            # BlockPool, KVCacheManager, kv_cache_utils, prefix_cache
   worker/          # Worker, GPUModelRunner, physical KV cache pool
   executor/        # ABC + UniProcExecutor
@@ -202,6 +202,7 @@ When implementing a new stage, follow this exact sequence:
 ## Key architecture facts
 
 - EngineCore `step()` = `schedule() → execute_model() → update_from_output()`
+- SchedulerInterface ABC: schedule() → SchedulerOutput, update_from_output(), finish_requests()
 - Model loading chain: `Executor._init_executor() → Worker.init_device() → GPUModelRunner.load_model()` — matching vLLM's deep loading architecture (model is loaded inside the runner, not passed in from the entry point)
 - KV cache is physical-block-based (BlockPool + FreeKVCacheBlockQueue, doubly-linked, O(1) alloc)
 - Prefix caching uses BlockHashToBlockMap (hash→list[block]), free_blocks() with ref_cnt cascading release, GC 驱逐逻辑, PrefixCache with CoW: shared blocks copied on write (ref_cnt > 1 → copy → decrement → private block)
