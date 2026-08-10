@@ -24,7 +24,6 @@ class TestBlockPool:
         assert pool.num_used == 0
         assert all(b.is_free for b in blocks)
         assert all(b.ref_cnt == 0 for b in blocks)
-        assert all(b.block_hash is None for b in blocks)
 
     def test_exhaust_and_reuse(self):
         pool = BlockPool(num_blocks=3, block_size=16)

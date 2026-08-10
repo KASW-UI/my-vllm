@@ -6,14 +6,14 @@ C018: allocate_slots() replaces allocate().  Manages per-request block
 tables and provides block ID lookups.  No longer creates KVCache objects
 (HF past_key_values) — the GPUModelRunner handles actual KV storage.
 
-C036: integrates PrefixCache for CoW protection on shared blocks.
+C036: CoW protection on shared blocks — clones shared blocks (ref_cnt>1)
+and records KVCacheBlockCopy for the Worker to execute.
 """
 
 from dataclasses import dataclass
 
 from my_vllm.v1.core.block_pool import BlockPool
-from my_vllm.v1.core.kv_cache_utils import KVCacheBlock
-from my_vllm.v1.core.prefix_cache import PrefixCache
+from my_vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy
 from my_vllm.v1.request import Request
 
 
@@ -39,9 +39,7 @@ class KVCacheManager:
     """KV cache lifecycle manager with allocate_slots interface.
 
     C018: tracks per-request block ownership via request_blocks dict.
-    Uses BlockPool (with FreeKVCacheBlockQueue + LRU eviction) for
-    allocation and freeing.  No longer manages KVCache (HF past_kv)
-    objects directly.
+    C036: CoW for shared blocks — allocates new block, records copy.
     """
 
     def __init__(
@@ -53,17 +51,12 @@ class KVCacheManager:
         self.block_pool = block_pool or BlockPool(num_blocks, block_size)
         self.block_size = self.block_pool.block_size
         self.request_blocks: dict[str, list[KVCacheBlock]] = {}
-        self.prefix_cache = PrefixCache(self.block_pool)
+        self._pending_cow_copies: list[KVCacheBlockCopy] = []
 
     def allocate_slots(
         self, request: Request, num_new_tokens: int
     ) -> KVCacheBlocks | None:
-        """Allocate blocks for num_new_tokens. Returns block IDs or None.
-
-        C029: respects pre-existing blocks from get_computed_blocks()
-        (prefix cache hits).  Only allocates additional blocks beyond
-        the already-cached portion.
-        """
+        """Allocate blocks for num_new_tokens. Returns block IDs or None."""
         total_blocks_needed = max(
             1, (num_new_tokens + self.block_size - 1) // self.block_size
         )
@@ -90,21 +83,9 @@ class KVCacheManager:
     ) -> tuple[KVCacheBlocks, int]:
         """Find consecutive prefix cache hits for a request.
 
-        C029: walks request.block_hashes from the start,
-        checking BlockPool.get_cached_block() for each.
-        Returns cached blocks + number of already-computed tokens.
-
-        C036: applies CoW via PrefixCache — bumps ref_cnt on reuse
-        (marks block as shared), then clones shared blocks (ref_cnt>1)
-        to prevent cross-request KV cache pollution.
-
-        Args:
-            request: the request to check for prefix cache hits.
-
-        Returns:
-            (KVCacheBlocks, num_new_computed_tokens) where:
-            - KVCacheBlocks: cached blocks (may be empty)
-            - num_new_computed_tokens: tokens covered by cache hits
+        C029: walks request.block_hashes from the start. C036: CoW —
+        bumps ref_cnt on reuse, clones shared blocks (ref_cnt>1) to
+        prevent cross-request KV cache pollution, and records KVCacheBlockCopy.
         """
         if not self.block_pool.enable_caching:
             return KVCacheBlocks.empty(), 0
@@ -121,7 +102,7 @@ class KVCacheManager:
             if cached is None:
                 break
             cached.ref_cnt += 1
-            private = self.prefix_cache.get_block_for_write(cached)
+            private = self._apply_cow(cached)
             cached_blocks.append(private)
             num_computed += min(
                 block_size,
@@ -135,6 +116,42 @@ class KVCacheManager:
             ), num_computed
 
         return KVCacheBlocks.empty(), 0
+
+    def _apply_cow(self, block: KVCacheBlock) -> KVCacheBlock:
+        """Copy-on-write: clone shared block so writes don't pollute.
+
+        Aligned with vLLM SingleTypeKVCacheManager._apply_cow pattern.
+        """
+        if block.ref_cnt <= 1:
+            return block
+        new_blocks = self.block_pool.get_new_blocks(1)
+        if new_blocks is None:
+            return block
+        cow_block = new_blocks[0]
+        self._pending_cow_copies.append(
+            KVCacheBlockCopy(
+                src_block_id=block.block_id,
+                dst_block_id=cow_block.block_id,
+            )
+        )
+        block.ref_cnt -= 1
+        return cow_block
+
+    def take_kv_cache_block_copies(
+        self,
+    ) -> tuple[list[KVCacheBlockCopy], list[KVCacheBlock]]:
+        """Drain pending CoW copies for the Worker to execute.
+
+        Aligned with vLLM KVCacheManager.take_kv_cache_block_copies.
+        Returns copies and the list of blocks to retain.
+        """
+        copies = self._pending_cow_copies
+        self._pending_cow_copies = []
+        retained = []
+        for c in copies:
+            retained.append(self.block_pool.blocks[c.src_block_id])
+            retained.append(self.block_pool.blocks[c.dst_block_id])
+        return copies, retained
 
     def get_block_ids(self, request_id: str) -> list[int]:
         bt = self.request_blocks.get(request_id, [])
@@ -155,11 +172,9 @@ class KVCacheManager:
     # --- backward-compat methods (C014 tests) ---
 
     def allocate(self, request: Request) -> bool:
-        """Compat: allocate blocks for a request's prompt tokens."""
         blocks = self.allocate_slots(request, len(request.prompt_token_ids))
         return blocks is not None
 
     def get_cache(self, request_id: str):
-        """Compat: returns block list (truthy) instead of KVCache object."""
         blocks = self.request_blocks.get(request_id)
         return blocks if blocks else None

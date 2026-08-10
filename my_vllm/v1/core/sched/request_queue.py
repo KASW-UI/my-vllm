@@ -39,7 +39,17 @@ class RequestQueue(ABC):
         pass
 
     @abstractmethod
+    def prepend_requests(self, requests: "RequestQueue") -> None:
+        """Prepend all requests from another queue to the front."""
+        pass
+
+    @abstractmethod
     def remove_request(self, request: Request) -> None:
+        pass
+
+    @abstractmethod
+    def remove_requests(self, requests: Iterable[Request]) -> None:
+        """Remove multiple specific requests from the queue."""
         pass
 
     @abstractmethod
@@ -48,6 +58,10 @@ class RequestQueue(ABC):
 
     @abstractmethod
     def __len__(self) -> int:
+        pass
+
+    @abstractmethod
+    def __iter__(self) -> Iterator[Request]:
         pass
 
 
@@ -71,8 +85,17 @@ class FCFSRequestQueue(deque[Request], RequestQueue):
     def prepend_request(self, request: Request) -> None:
         self.appendleft(request)
 
+    def prepend_requests(self, requests: RequestQueue) -> None:
+        self.extendleft(requests)
+
     def remove_request(self, request: Request) -> None:
         self.remove(request)
+
+    def remove_requests(self, requests: Iterable[Request]) -> None:
+        to_remove = set(requests)
+        filtered = [r for r in self if r not in to_remove]
+        self.clear()
+        self.extend(filtered)
 
     def __bool__(self) -> bool:
         return len(self) > 0
@@ -87,45 +110,53 @@ class FCFSRequestQueue(deque[Request], RequestQueue):
 class PriorityRequestQueue(RequestQueue):
     """Heap-based priority queue — aligns with vLLM V1 PriorityRequestQueue.
 
-    Higher priority values (more negative) are scheduled first.
-    Uses (priority, arrival_time, seq) as heap key for stable ordering.
+    Stores Request objects directly as heap items. Requests are ordered
+    by Request.__lt__: lower priority value → scheduled first;
+    same priority → later arrival first.
     """
 
     def __init__(self):
-        self._heap: list[tuple[int, float, int, Request]] = []
-        self._seq: int = 0
+        self._heap: list[Request] = []
 
     def add_request(self, request: Request) -> None:
-        key = (-request.priority, request.arrival_time, self._seq)
-        self._seq += 1
-        heapq.heappush(self._heap, (key[0], key[1], key[2], request))
+        heapq.heappush(self._heap, request)
 
     def pop_request(self) -> Request:
         if not self._heap:
             raise IndexError("pop from an empty priority queue")
-        return heapq.heappop(self._heap)[3]
+        return heapq.heappop(self._heap)
 
     def peek_request(self) -> Request:
         if not self._heap:
             raise IndexError("peek from an empty priority queue")
-        return self._heap[0][3]
+        return self._heap[0]
 
     def prepend_request(self, request: Request) -> None:
-        key = (-request.priority, request.arrival_time, -1)
-        heapq.heappush(self._heap, (key[0], key[1], key[2], request))
+        self.add_request(request)
+
+    def prepend_requests(self, requests: RequestQueue) -> None:
+        for r in requests:
+            self.add_request(r)
 
     def remove_request(self, request: Request) -> None:
-        for i, (_, _, _, r) in enumerate(self._heap):
-            if r is request:
-                self._heap.pop(i)
-                heapq.heapify(self._heap)
-                return
+        self._heap.remove(request)
+        heapq.heapify(self._heap)
+
+    def remove_requests(self, requests: Iterable[Request]) -> None:
+        to_remove = requests if isinstance(requests, set) else set(requests)
+        self._heap = [r for r in self._heap if r not in to_remove]
+        heapq.heapify(self._heap)
 
     def __bool__(self) -> bool:
         return len(self._heap) > 0
 
     def __len__(self) -> int:
         return len(self._heap)
+
+    def __iter__(self) -> Iterator[Request]:
+        heap_copy = self._heap[:]
+        while heap_copy:
+            yield heapq.heappop(heap_copy)
 
 
 def create_request_queue(policy: SchedulingPolicy) -> RequestQueue:

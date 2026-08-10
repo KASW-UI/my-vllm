@@ -7,6 +7,8 @@ C038: num_common_prefix_blocks tracks per-request shared prefix cache hits.
 
 from dataclasses import dataclass, field
 
+from my_vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
+
 
 @dataclass
 class NewRequestData:
@@ -69,6 +71,7 @@ class SchedulerOutput:
     new_block_ids_to_zero: list[int] | None = None
     preempted_req_ids: set[str] | None = None
     num_common_prefix_blocks: list[int] = field(default_factory=list)
+    kv_cache_block_copies: list[KVCacheBlockCopy] | None = None
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":

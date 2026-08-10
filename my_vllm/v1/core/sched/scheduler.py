@@ -7,10 +7,8 @@ C030: chunked prefill — long prompts split by token_budget;
 C037: implements SchedulerInterface ABC for standardized contract.
 C038: resource model — explicit GPU/KV/token budget checks.
 C051: multi-policy scheduling — FCFS/Priority via SchedulingPolicy.
-C052: preemption — RECOMPUTE/SWAP victim selection + KV reclaim.
+C052: preemption — _preempt_request frees KV blocks + resets tokens.
 """
-
-from enum import Enum
 
 from my_vllm.v1.core.kv_cache_manager import KVCacheManager
 from my_vllm.v1.core.sched.interface import SchedulerInterface
@@ -27,16 +25,11 @@ from my_vllm.v1.outputs import EngineCoreOutputs, ModelRunnerOutput
 from my_vllm.v1.request import Request, RequestStatus
 
 
-class PreemptionMode(Enum):
-    RECOMPUTE = "recompute"
-    SWAP = "swap"
-
-
 class Scheduler(SchedulerInterface):
     """Multi-policy scheduler with chunked prefill, prefix cache, resource model.
 
     C051: policy parameter selects FCFS or Priority scheduling.
-    C052: preemption (RECOMPUTE/SWAP) reclaims resources from low-priority requests.
+    C052: preempt_request frees KV blocks, resets num_computed_tokens, requeues.
     """
 
     def __init__(
@@ -45,7 +38,6 @@ class Scheduler(SchedulerInterface):
         kv_cache_manager: KVCacheManager | None = None,
         max_num_batched_tokens: int = 2048,
         policy: SchedulingPolicy = SchedulingPolicy.FCFS,
-        preemption_mode: PreemptionMode = PreemptionMode.RECOMPUTE,
     ):
         self.scheduling_policy = policy
         self.waiting = create_request_queue(policy)
@@ -53,7 +45,6 @@ class Scheduler(SchedulerInterface):
         self.max_running = max_running
         self.kv_cache_manager = kv_cache_manager
         self.max_num_batched_tokens = max_num_batched_tokens
-        self.preemption_mode = preemption_mode
 
     def add_request(self, request: Request):
         request.status = RequestStatus.WAITING
@@ -175,6 +166,12 @@ class Scheduler(SchedulerInterface):
         )
         total_tokens += len(self.running)
 
+        kv_cache_block_copies = None
+        if self.kv_cache_manager is not None:
+            kv_cache_block_copies, _ = (
+                self.kv_cache_manager.take_kv_cache_block_copies()
+            )
+
         return SchedulerOutput(
             scheduled_new_reqs=new_req_datas,
             scheduled_cached_reqs=cached_data,
@@ -183,9 +180,10 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=set(),
             preempted_req_ids=preempted_req_ids or None,
             num_common_prefix_blocks=num_common_prefix_blocks,
+            kv_cache_block_copies=kv_cache_block_copies or None,
         )
 
-    # --- C052 preemption ---
+    # --- C052 preemption (like vLLM _preempt_request) ---
 
     def _select_preemption_victims(self) -> list[Request]:
         """Select preemptible running requests sorted by priority (lowest first)."""
@@ -194,14 +192,17 @@ class Scheduler(SchedulerInterface):
         candidates.sort(key=lambda r: r.priority)
         return candidates
 
-    def _preempt(self, victim: Request) -> None:
-        """Preempt a single request — free KV blocks, set PREEMPTED."""
-        if self.preemption_mode == PreemptionMode.RECOMPUTE:
-            if self.kv_cache_manager is not None:
-                self.kv_cache_manager.free(victim.request_id)
-            victim.num_computed_tokens = 0
-        elif self.preemption_mode == PreemptionMode.SWAP:
-            victim.is_preempted_swapped = True
+    def _preempt_request(self, victim: Request) -> None:
+        """Preempt a running request — free KV blocks, reset tokens, requeue.
+        
+        Aligned with vLLM Scheduler._preempt_request: frees KV blocks,
+        resets num_computed_tokens to 0, increments num_preemptions,
+        sets PREEMPTED status, and puts back to waiting queue.
+        """
+        if self.kv_cache_manager is not None:
+            self.kv_cache_manager.free(victim.request_id)
+        victim.num_computed_tokens = 0
+        victim.num_preemptions += 1
         victim.status = RequestStatus.PREEMPTED
         self.running.remove(victim)
         self.waiting.prepend_request(victim)
@@ -215,7 +216,7 @@ class Scheduler(SchedulerInterface):
         victims = self._select_preemption_victims()
         if not victims:
             return False
-        self._preempt(victims[0])
+        self._preempt_request(victims[0])
         preempted_ids.add(victims[0].request_id)
         return True
 
@@ -223,17 +224,14 @@ class Scheduler(SchedulerInterface):
         self, request: Request, prompt_len: int,
         preempted_ids: set[str],
     ) -> bool:
-        """Preempt victims until enough KV blocks are free for the request.
-
-        After each preemption, try allocating again to check progress.
-        """
+        """Preempt victims until enough KV blocks are free for the request."""
         if not self.running or self.kv_cache_manager is None:
             return False
         victims = self._select_preemption_victims()
         for victim in victims:
             if victim.priority >= request.priority:
                 continue
-            self._preempt(victim)
+            self._preempt_request(victim)
             preempted_ids.add(victim.request_id)
             blocks = self.kv_cache_manager.allocate_slots(
                 request, prompt_len
@@ -245,16 +243,13 @@ class Scheduler(SchedulerInterface):
     # --- C038 resource budget checks ---
 
     def _has_gpu_budget(self) -> bool:
-        """GPU budget: max_num_seqs not exceeded."""
         return len(self.running) < self.max_running
 
     def _has_token_budget(self, remaining: int) -> bool:
-        """Token budget: at least one token slot available."""
         return remaining > 0
 
     @staticmethod
     def _has_kv_budget(blocks) -> bool:
-        """KV budget: sufficient free blocks allocated."""
         return blocks is not None
 
     # --- request lifecycle ---
@@ -299,12 +294,7 @@ class Scheduler(SchedulerInterface):
         eos_token_id: int,
         max_tokens: int,
     ) -> EngineCoreOutputs:
-        """Detect finished requests from model output.
-
-        C032: EngineCore delegates finish detection to the scheduler
-        instead of iterating requests inline.  OutputProcessor still
-        handles token appending and detokenization for correct ordering.
-        """
+        """Detect finished requests from model output."""
         finished: list[Request] = []
         for rid, token_ids in model_output.sampled_token_ids.items():
             req = self._find_request(rid)

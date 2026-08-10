@@ -58,7 +58,9 @@ class TestBlockPoolCache:
         pool.cached_block_hash_to_block.insert(b"myhash", b)
         assert pool.get_cached_block(b"myhash") is b
         pool.free_blocks([b])
-        assert pool.get_cached_block(b"myhash") is None
+        # vLLM-style lazy eviction: block stays in hash map as LRU candidate
+        assert pool.get_cached_block(b"myhash") is b
+        assert b.is_free
 
     def test_cache_full_blocks(self):
         pool = BlockPool(32, enable_caching=True)

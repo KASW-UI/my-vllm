@@ -134,16 +134,15 @@ class BlockPool:
 
         C035: decrements ref_cnt instead of setting to 0.
         Blocks are only truly freed when ref_cnt reaches 0.
-        This handles shared blocks (prefix cache) safely.
+        Blocks with a hash stay in the prefix cache as LRU eviction
+        candidates (like vLLM) — they may be re-used by other requests
+        until actually evicted from the free queue.
         """
         for b in blocks:
             if b.ref_cnt > 0:
                 b.ref_cnt -= 1
             if b.ref_cnt == 0:
                 b._is_free = True
-                h = b.reset_hash()
-                if h:
-                    self.cached_block_hash_to_block.pop(h, b.block_id)
                 self.free_block_queue.append(b)
 
     def touch(self, blocks: list[KVCacheBlock]):

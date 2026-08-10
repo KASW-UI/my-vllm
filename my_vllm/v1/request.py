@@ -1,4 +1,5 @@
 import enum
+import functools
 import time
 from dataclasses import dataclass, field
 
@@ -75,7 +76,6 @@ class Request:
         self.num_computed_tokens: int = 0
         self.num_preemptions: int = 0
         self.block_hashes: list[bytes] = []
-        self.is_preempted_swapped: bool = False
 
         self._output_token_ids: list[int] = []
         self._all_token_ids: list[int] = list(self.prompt_token_ids)
@@ -132,6 +132,20 @@ class Request:
 
     def is_finished(self) -> bool:
         return RequestStatus.is_finished(self.status)
+
+    def __lt__(self, other: "Request") -> bool:
+        """Lower priority value = higher scheduling priority."""
+        if self.priority != other.priority:
+            return self.priority < other.priority
+        return self.arrival_time > other.arrival_time
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, Request):
+            return NotImplemented
+        return self.request_id == other.request_id
+
+    def __hash__(self) -> int:
+        return hash(self.request_id)
 
     def __repr__(self) -> str:
         return (
