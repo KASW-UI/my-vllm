@@ -6,16 +6,19 @@ This is an **educational simulation** of the vLLM V1 serving runtime. Each Git c
 
 **Current baseline**: C032 (`C032-cleanup` tag). C033 and C034 were implemented on an unmerged branch and are **abandoned (废案)**. 
 
-**Current status**: All 24 P0 stages (C035→C098) are implemented across 4 phases:
+**Current status**: All 24 P0 stages (C035→C098) implemented across 4 phases:
 - Phase 1 (single-GPU production): C035, C036, C037, C038, C051, C052, C054c, C048, C054, C050, C069 — complete
 - Phase 2 (distributed runtime): C083, C080, C081, C082, C084, C085, C086 — complete
 - Phase 3 (cluster + KV transfer): C091, C092, C093, C102 — complete
 - Phase 4 (convergence): C107, C098 — complete
 - 13 P1 stages intentionally deferred; 61 P2 stages intentionally skipped.
 
-Future work starts from this baseline following the career-focused plan at `Base-on-C032-Focus-Career/README.md`.
+**Logic alignment** (post-C098): Internal implementation logic has been audited and aligned with real vLLM across 3 commits:
+1. VllmConfig propagation + output structures + types (config flows through all constructors, dict→list index alignment, FinishReason, MsgpackEncoder, directory migration)
+2. step() pipeline restructure (EngineCoreOutputs list, Scheduler EOS/length internal, OutputProcessor detokenization-only, EngineCore/LLMEngine separation)
+3. BlockPool fixes + unified batching + PagedAttention interface (touch() crash fix, hash eviction, free_blocks eviction ordering, __lt__ FCFS ordering, max_cache_hit_length, unified _update_states→prefill→decode flow, torch_attn paged KV interface)
 
-Architecture reference: `C014-Final.md` at repo root.
+**Next goal**: Make both code implementation logic and file tree architecture a proper subset of `/home/kasw/文档/GitHub/GPU-Project/vllm`. Every file in `my_vllm/` should correspond to a real file in `vllm/`, with matching API names, method signatures, data structures, and internal algorithm logic. Educational simplifications are permitted for reduced scope (fewer fields, single model, no quantization) but no invented patterns or APIs.
 
 ## Commands
 
@@ -39,59 +42,46 @@ pytest tests/test_C031_runtime.py::TestC031FileCompleteness -v
 
 There is no CI, no lint, no formatter, no typecheck configured.
 
-## Package layout — real code vs. stale stubs
+## Package layout
 
-**Active code lives in `my_vllm/v1/`.** This is the real engine. API names (classes, methods, file names) are extracted from real vLLM at `/home/kasw/文档/GitHub/GPU-Project/vllm` and simplified for education.
-
-```
-my_vllm/v1/
-  config/          # VllmConfig, ModelConfig, CacheConfig, SchedulerConfig
-  engine/          # EngineCore, LLMEngine, AsyncLLM, I/O processors, detokenizer
-    core/sched/      # Scheduler, SchedulerInterface, SchedulerOutput, request_queue (SchedulingPolicy, FCFSRequestQueue, PriorityRequestQueue, create_request_queue)
-    core/            # BlockPool, KVCacheManager, kv_cache_utils
-  worker/          # Worker, GPUModelRunner, physical KV cache pool
-  executor/        # ABC, UniProcExecutor, MultiprocExecutor
-  attention/       # BackendABC, CommonAttentionMetadata, backends/ops/paged_attn.py
-  sample/          # Sampler (nn.Module), LogitsProcessor
-  model_executor/  # model_loader, layers/linear (TP), layers/fused_moe (FusedMoE → MoERunner, FusedMoERouter, ExpertMLP), models/opt
-  distributed/     # parallel_state.py (GroupCoordinator + initialize_model_parallel)
-  metrics/         # collector, stats (SchedulerStats, IterationStats), loggers, prometheus — TTFT, TPOT, ITL, throughput, KV utilization
-  request.py       # Request dataclass (11 statuses)
-  outputs.py       # SamplerOutput, ModelRunnerOutput, EngineCoreOutput(s)
-  utils.py         # ConstantList
-  serial_utils.py  # MsgpackEncoder/Decoder for IPC
-  kv_cache_interface.py  # KVCacheSpec, FullAttentionSpec, SlidingWindowSpec, MLAAttentionSpec, KVCacheGroupSpec
-```
-
-Legacy stub directories (empty `__init__.py` only — deleted stub helpers in C032):
+**Active code lives in `my_vllm/`.** Every file path maps to a real file in `/home/kasw/文档/GitHub/GPU-Project/vllm/`. Config, distributed, and model_executor are at top level (matching vLLM), not nested under v1/.
 
 ```
-my_vllm/cache/         # ← abandoned
-my_vllm/scheduler/     # ← abandoned
-my_vllm/worker/        # ← abandoned
-my_vllm/executor/      # ← abandoned
-my_vllm/generation/    # ← abandoned
-my_vllm/batch/         # ← abandoned
+my_vllm/
+  config/              # → vllm/config/  VllmConfig, ModelConfig, CacheConfig, SchedulerConfig, ParallelConfig
+  distributed/         # → vllm/distributed/  parallel_state.py (GroupCoordinator), elastic_ep/
+  model_executor/      # → vllm/model_executor/  model_loader, layers/linear, layers/fused_moe, models/opt
+  v1/                  # → vllm/v1/
+    engine/            # EngineCore, LLMEngine, AsyncLLM, InputProcessor, OutputProcessor, detokenizer, exceptions
+    core/              # BlockPool, KVCacheManager, kv_cache_utils, kv_cache_metrics, kv_connector
+      sched/           # Scheduler, SchedulerInterface, SchedulerOutput, request_queue
+    worker/            # WorkerBase, Worker, GPUModelRunner
+      gpu/             # BlockTables, InputBatch, RequestState, PPHandler, model_states/
+    executor/          # Executor ABC, UniProcExecutor, MultiprocExecutor, RayDistributedExecutor, ray_utils
+    attention/         # AttentionBackend ABC, CommonAttentionMetadata, selector, backends/torch_attn, backends/ops/paged_attn
+    sample/            # Sampler (nn.Module), LogitsProcessor, SamplingMetadata
+    metrics/           # collector, stats, loggers, prometheus
+    engine/__init__.py # FinishReason, EngineCoreOutput, EngineCoreOutputs
+    request.py         # Request (12 statuses), SamplingParams
+    outputs.py         # SamplerOutput, ModelRunnerOutput
+    serial_utils.py    # MsgpackEncoder/Decoder (binary format)
+    utils.py           # ConstantList
+    kv_cache_interface.py  # KVCacheSpec hierarchy
+  runtime/             # tokenizer.py, main.py (entry bridge)
+  server/              # api_server.py (HTTP entry point)
+  run.py               # CLI entry point
 ```
 
-After C032-clean: `config.py`, `distributed/`, `model_executor/` moved into `v1/`;
-`engine/` removed entirely; `runtime/model_loader.py` deleted (duplicate);
-`server/async_llm.py` deleted (dead bridge). Remaining top-level dirs:
+No legacy stub directories remain. All code goes under `my_vllm/` following vLLM's directory structure.
 
-```
-my_vllm/runtime/       # tokenizer.py, model.py (legacy shim), main.py (entry)
-my_vllm/server/        # api_server.py (HTTP entry point)
-my_vllm/metrics/       # bridge → v1/metrics/collector
-```
-
-**Do not write new code into the legacy directories.** All new code goes under `my_vllm/v1/`.
+**Path mapping is now 1:1**: `my_vllm/` → `vllm/` (e.g., `my_vllm/config/vllm.py` → `vllm/config/vllm.py`).
 
 ## Configuration
 
-`my_vllm/v1/config/` — `VllmConfig` aggregates `ModelConfig`, `CacheConfig`, `SchedulerConfig`. Defaults:
+`my_vllm/config/` — `VllmConfig` aggregates `ModelConfig`, `CacheConfig`, `SchedulerConfig`, `ParallelConfig`. Defaults:
 - model: `facebook/opt-125m`, dtype: `bfloat16`, block_size: `16`, num_kv_blocks: `512`, max_num_seqs: `8`
 - enforce_eager: `True`, max_num_batched_tokens: `2048`, eos_token_id: `2`
-- `v1/config.py` re-exports `EngineConfig` for backward compat.
+- `v1/config.py` re-exports `EngineConfig` (VllmConfig alias) for backward compat.
 
 ## Design documents (Principle/)
 
@@ -141,9 +131,16 @@ The **Phase implementation spec** for each stage determines which vLLM APIs to e
 - **P1 stages**: implement simplified/educational versions or write analysis docs only.
 - **P2 stages**: intentionally skipped — do NOT implement.
 
-**Path mapping**: Educational project `my_vllm/v1/distributed/` → real vLLM `vllm/distributed/` (top-level). `my_vllm/v1/model_executor/` → `vllm/model_executor/` (top-level). Translate paths when reading real source.
+**Path mapping is 1:1**: `my_vllm/` directory structure mirrors `vllm/` directly (e.g., `my_vllm/config/` → `vllm/config/`, `my_vllm/v1/engine/` → `vllm/v1/engine/`).
 
-**Implementation alignment**: P0 阶段不止 API 命名——核心实现（方法体、调用链、事件通知模式、通信原语选择、引用计数语义、采样策略）也须参照真实 vLLM 源码逐模块对照，只做教育性的行数和复杂度削减，不改变架构语义。
+**Implementation alignment**: P0 阶段的内部实现逻辑（方法体、调用链、事件通知模式、引用计数语义）已逐模块对照真实 vLLM 源码进行审计和对齐：
+- Config 传播链：VllmConfig 作为单一对象贯穿所有构造函数
+- step() 管道：EngineCore.step() → EngineCoreOutputs → LLMEngine → OutputProcessor
+- KV Cache：BlockPool touch/get_new_blocks/free_blocks 已修复崩溃和静默数据损坏
+- Scheduler：EOS/length 检测内聚在 update_from_output()
+- OutputProcessor：仅做 detokenization，不再重复检测 EOS
+- Unified batching：_update_states → _execute_prefill → _execute_decode 统一流程
+- PagedAttention：torch_attn 接口接受 kv_cache + block_table + seq_lens
 
 ## Before EVERY code modification:
 
@@ -212,7 +209,8 @@ When implementing a new stage, follow this exact sequence:
 
 ## Key architecture facts
 
-- EngineCore `step()` = `schedule() → execute_model() → update_from_output()`
+- EngineCore `step()` = `schedule() → execute_model() → update_from_output()` → EngineCoreOutputs
+- LLMEngine `step()` = EngineCore.step() → EngineCoreOutputs → OutputProcessor.process_outputs()
 - SchedulerInterface ABC: schedule() → SchedulerOutput, update_from_output(), finish_requests()
 - Model loading chain: `Executor._init_executor() → Worker.init_device() → GPUModelRunner.load_model()` — matching vLLM's deep loading architecture (model is loaded inside the runner, not passed in from the entry point)
 - MultiprocExecutor: Worker Process per GPU, 替代 UniProcExecutor 支持多进程并行
