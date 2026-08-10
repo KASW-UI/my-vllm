@@ -6,6 +6,7 @@ C030: chunked prefill — long prompts split by token_budget;
       num_computed_tokens tracks prefill progress per-chunk.
 C037: implements SchedulerInterface ABC for standardized contract.
 C038: resource model — explicit GPU/KV/token budget checks.
+C051: multi-policy scheduling — FCFS/Priority via SchedulingPolicy.
 """
 
 from my_vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -15,18 +16,18 @@ from my_vllm.v1.core.sched.output import (
     NewRequestData,
     SchedulerOutput,
 )
-from my_vllm.v1.core.sched.request_queue import FCFSRequestQueue
+from my_vllm.v1.core.sched.request_queue import (
+    SchedulingPolicy,
+    create_request_queue,
+)
 from my_vllm.v1.outputs import EngineCoreOutputs, ModelRunnerOutput
 from my_vllm.v1.request import Request, RequestStatus
 
 
 class Scheduler(SchedulerInterface):
-    """FCFS scheduler with chunked prefill, prefix cache, and resource model.
+    """Multi-policy scheduler with chunked prefill, prefix cache, resource model.
 
-    C038: schedule() checks three resource budgets before admitting requests:
-        - GPU budget: max_num_seqs (running count vs max_running)
-        - KV budget: sufficient free blocks for the request's tokens
-        - Token budget: num_scheduled_tokens <= max_num_batched_tokens
+    C051: policy parameter selects FCFS or Priority scheduling.
     """
 
     def __init__(
@@ -34,8 +35,10 @@ class Scheduler(SchedulerInterface):
         max_running: int = 8,
         kv_cache_manager: KVCacheManager | None = None,
         max_num_batched_tokens: int = 2048,
+        policy: SchedulingPolicy = SchedulingPolicy.FCFS,
     ):
-        self.waiting = FCFSRequestQueue()
+        self.scheduling_policy = policy
+        self.waiting = create_request_queue(policy)
         self.running: list[Request] = []
         self.max_running = max_running
         self.kv_cache_manager = kv_cache_manager

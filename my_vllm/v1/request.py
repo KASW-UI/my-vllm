@@ -57,6 +57,7 @@ class Request:
         prompt_token_ids: list[int] | None = None,
         sampling_params: SamplingParams | None = None,
         arrival_time: float | None = None,
+        priority: int = 0,
     ) -> None:
         self.request_id = request_id
         self.prompt_token_ids: list[int] = prompt_token_ids or []
@@ -70,6 +71,7 @@ class Request:
             sampling_params.max_tokens if sampling_params is not None else 0
         )
 
+        self.priority: int = priority
         self.num_computed_tokens: int = 0
         self.num_preemptions: int = 0
         self.block_hashes: list[bytes] = []
