@@ -5,12 +5,15 @@ Mirrors vLLM V1 v1/core/kv_cache_manager.py.
 C018: allocate_slots() replaces allocate().  Manages per-request block
 tables and provides block ID lookups.  No longer creates KVCache objects
 (HF past_key_values) — the GPUModelRunner handles actual KV storage.
+
+C036: integrates PrefixCache for CoW protection on shared blocks.
 """
 
 from dataclasses import dataclass
 
 from my_vllm.v1.core.block_pool import BlockPool
 from my_vllm.v1.core.kv_cache_utils import KVCacheBlock
+from my_vllm.v1.core.prefix_cache import PrefixCache
 from my_vllm.v1.request import Request
 
 
@@ -50,6 +53,7 @@ class KVCacheManager:
         self.block_pool = block_pool or BlockPool(num_blocks, block_size)
         self.block_size = self.block_pool.block_size
         self.request_blocks: dict[str, list[KVCacheBlock]] = {}
+        self.prefix_cache = PrefixCache(self.block_pool)
 
     def allocate_slots(
         self, request: Request, num_new_tokens: int
@@ -90,6 +94,10 @@ class KVCacheManager:
         checking BlockPool.get_cached_block() for each.
         Returns cached blocks + number of already-computed tokens.
 
+        C036: applies CoW via PrefixCache — bumps ref_cnt on reuse
+        (marks block as shared), then clones shared blocks (ref_cnt>1)
+        to prevent cross-request KV cache pollution.
+
         Args:
             request: the request to check for prefix cache hits.
 
@@ -112,7 +120,9 @@ class KVCacheManager:
             cached = self.block_pool.get_cached_block(block_hash)
             if cached is None:
                 break
-            cached_blocks.append(cached)
+            cached.ref_cnt += 1
+            private = self.prefix_cache.get_block_for_write(cached)
+            cached_blocks.append(private)
             num_computed += min(
                 block_size,
                 len(request.prompt_token_ids) - num_computed,

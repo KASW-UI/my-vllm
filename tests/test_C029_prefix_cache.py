@@ -93,7 +93,8 @@ class TestKVCacheManagerComputed:
         blks_b, num = mgr.get_computed_blocks(req_b)
         assert num == 16
         assert len(blks_b) == 1
-        assert blks_b.block_ids == blks_a.block_ids  # same physical blocks
+        # C036 CoW: B gets a cloned block, not the original
+        assert blks_b.block_ids != blks_a.block_ids
 
     def test_get_computed_blocks_partial_hit(self):
         pool = BlockPool(32, enable_caching=True)
