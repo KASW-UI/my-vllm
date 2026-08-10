@@ -5,8 +5,8 @@ import torch
 from my_vllm.v1.attention.backend import AttentionBackend, AttentionImpl
 from my_vllm.v1.attention.metadata import CommonAttentionMetadata
 from my_vllm.v1.attention.selector import get_attn_backend
-from my_vllm.v1.attention.backends.torch_attn import (
-    TorchAttentionBackend, TorchAttentionImpl,
+from my_vllm.v1.attention.backends.flash_attn import (
+    FlashAttentionBackend, FlashAttentionImpl,
 )
 
 
@@ -21,34 +21,34 @@ class TestAttentionBackendABC:
         with pytest.raises(TypeError):
             AttentionImpl(4, 64, 1.0)
 
-    def test_torch_backend_get_name(self):
-        assert TorchAttentionBackend.get_name() == "torch_attn"
+    def test_flash_backend_get_name(self):
+        assert FlashAttentionBackend.get_name() == "FLASH_ATTN"
 
-    def test_torch_backend_get_impl_cls(self):
-        assert TorchAttentionBackend.get_impl_cls() is TorchAttentionImpl
+    def test_flash_backend_get_impl_cls(self):
+        assert FlashAttentionBackend.get_impl_cls() is FlashAttentionImpl
 
-    def test_torch_backend_kv_cache_shape(self):
-        shape = TorchAttentionBackend.get_kv_cache_shape(
+    def test_flash_backend_kv_cache_shape(self):
+        shape = FlashAttentionBackend.get_kv_cache_shape(
             num_blocks=32, block_size=16,
             num_kv_heads=4, head_size=64,
         )
         assert shape == (32, 4, 16, 64)
 
 
-class TestTorchAttentionImpl:
+class TestFlashAttentionImpl:
     def test_init_default(self):
-        impl = TorchAttentionImpl(8, 64, 1.0)
+        impl = FlashAttentionImpl(8, 64, 1.0)
         assert impl.num_heads == 8
         assert impl.head_size == 64
         assert impl.num_kv_heads == 8
 
     def test_init_gqa(self):
-        impl = TorchAttentionImpl(8, 64, 1.0, num_kv_heads=2)
+        impl = FlashAttentionImpl(8, 64, 1.0, num_kv_heads=2)
         assert impl.num_heads == 8
         assert impl.num_kv_heads == 2
 
     def test_forward_basic(self):
-        impl = TorchAttentionImpl(4, 32, 1.0)
+        impl = FlashAttentionImpl(4, 32, 1.0)
         num_tokens = 3
         q = torch.randn(num_tokens, 4, 32)
         k = torch.randn(num_tokens, 4, 32)
@@ -76,7 +76,7 @@ class TestTorchAttentionImpl:
         assert not torch.equal(result, torch.zeros_like(result))
 
     def test_forward_gqa(self):
-        impl = TorchAttentionImpl(8, 32, 1.0, num_kv_heads=2)
+        impl = FlashAttentionImpl(8, 32, 1.0, num_kv_heads=2)
         num_tokens = 2
         q = torch.randn(num_tokens, 8, 32)
         k = torch.randn(num_tokens, 2, 32)
@@ -175,5 +175,5 @@ class TestCommonAttentionMetadata:
 class TestSelector:
     def test_get_attn_backend(self):
         backend = get_attn_backend()
-        assert backend is TorchAttentionBackend
-        assert backend.get_name() == "torch_attn"
+        assert backend is FlashAttentionBackend
+        assert backend.get_name() == "FLASH_ATTN"

@@ -1,7 +1,7 @@
 """Attention backend interface — mirrors vLLM V1 v1/attention/backend.py.
 
 C022: abstract interfaces (AttentionBackend, AttentionImpl) for
-pluggable attention computation.  TorchAttentionBackend is the
+pluggable attention computation.  FlashAttentionBackend
 default fallback using HF's native attention via model.forward().
 """
 
