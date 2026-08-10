@@ -7,7 +7,7 @@ online softmax LSE merge for correct cross-GPU attention.
 import torch
 import torch.nn.functional as F
 
-from my_vllm.v1.distributed.parallel_state import get_tp_group
+from my_vllm.distributed.parallel_state import get_tp_group
 
 
 class CPGroup:

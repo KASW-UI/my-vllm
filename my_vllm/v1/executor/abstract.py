@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from my_vllm.config.vllm import VllmConfig
     from my_vllm.v1.core.sched.output import SchedulerOutput
     from my_vllm.v1.outputs import ModelRunnerOutput
 
@@ -25,44 +26,56 @@ class Executor(ABC):
 
     Subclasses:
       UniProcExecutor  — single worker, same-process (default)
-      (future) MultiProcExecutor — multiple workers, multiprocess
+      MultiprocExecutor — multiple workers, multiprocess
     """
 
     uses_ray: bool = False
     supports_pp: bool = False
 
     @staticmethod
-    def get_class(backend: str = "uni") -> type[Executor]:
-        """Factory: select executor implementation by backend name.
+    def get_class(vllm_config: VllmConfig) -> type[Executor]:
+        """Factory: select executor implementation from VllmConfig.
 
-        Args:
-            backend: "uni" | "mp" (multiproc, stub at C028)
-
-        Returns:
-            Executor subclass to instantiate.
+        Mirrors vLLM V1 Executor.get_class(vllm_config).
         """
+        from my_vllm.config.vllm import VllmConfig as _V
+
+        backend = getattr(
+            vllm_config.parallel_config,
+            "distributed_executor_backend",
+            None,
+        )
+        if backend is None:
+            if vllm_config.parallel_config.world_size > 1:
+                backend = "mp"
+            else:
+                backend = "uni"
+
         if backend == "mp":
             from my_vllm.v1.executor.multiproc_executor import MultiprocExecutor
-
             return MultiprocExecutor
+        if backend == "ray":
+            from my_vllm.v1.executor.ray_executor import RayDistributedExecutor
+            return RayDistributedExecutor
 
         from my_vllm.v1.executor.uniproc_executor import UniProcExecutor
-
         return UniProcExecutor
+
+    def __init__(self, vllm_config: VllmConfig) -> None:
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
+        self.parallel_config = vllm_config.parallel_config
+        self.scheduler_config = vllm_config.scheduler_config
+
+    @abstractmethod
+    def _init_executor(self) -> None:
+        """Initialize the executor — create workers and load models."""
 
     @abstractmethod
     def execute_model(
         self, scheduler_output: SchedulerOutput
     ) -> ModelRunnerOutput:
-        """Execute the model on the given scheduler output.
-
-        Args:
-            scheduler_output: structured scheduling metadata.
-
-        Returns:
-            ModelRunnerOutput with per-request sampled token IDs,
-            or None if no work was scheduled.
-        """
         ...
 
     @abstractmethod

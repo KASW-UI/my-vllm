@@ -3,8 +3,15 @@
 C091: Ray actor lifecycle + PlacementGroup for cross-node GPU inference.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from my_vllm.v1.executor.abstract import Executor
 from my_vllm.v1.outputs import ModelRunnerOutput
+
+if TYPE_CHECKING:
+    from my_vllm.config.vllm import VllmConfig
 
 
 class RayDistributedExecutor(Executor):
@@ -17,17 +24,9 @@ class RayDistributedExecutor(Executor):
     uses_ray: bool = True
     supports_pp: bool = True
 
-    def __init__(
-        self,
-        model_name: str = "facebook/opt-125m",
-        dtype_str: str = "bfloat16",
-        world_size: int = 1,
-        placement_group=None,
-    ):
-        super().__init__()
-        self.model_name = model_name
-        self.dtype_str = dtype_str
-        self.world_size = world_size
+    def __init__(self, vllm_config: VllmConfig, placement_group=None):
+        super().__init__(vllm_config)
+        self.world_size = vllm_config.parallel_config.world_size
         self.placement_group = placement_group
         self._workers: list = []
 

@@ -1,6 +1,6 @@
 import torch
-from my_vllm.v1.distributed.parallel_state import init_distributed
-from my_vllm.v1.model_executor.layers.linear import (
+from my_vllm.distributed.parallel_state import init_distributed
+from my_vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     RowParallelLinear,
 )

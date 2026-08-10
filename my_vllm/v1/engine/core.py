@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import logging
 import time
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -18,6 +21,9 @@ from my_vllm.v1.metrics.stats import (
 )
 from my_vllm.v1.request import Request, RequestStatus
 
+if TYPE_CHECKING:
+    from my_vllm.config.vllm import VllmConfig
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,35 +37,40 @@ class EngineCore:
 
     def __init__(
         self,
-        executor: Executor,
-        device: torch.device,
-        max_new_tokens: int = 50,
-        eos_token_id: int = 2,
-        max_running: int = 8,
-        num_kv_blocks: int = 512,
-        block_size: int = 16,
-        tokenizer=None,
+        vllm_config: VllmConfig,
+        executor_class: type[Executor],
+        log_stats: bool = False,
     ):
-        self.max_new_tokens = max_new_tokens
-        self.eos_token_id = eos_token_id
-        self.device = device
+        self.vllm_config = vllm_config
+        cc = vllm_config.cache_config
+        sc = vllm_config.scheduler_config
 
-        self.executor = executor
-        self.worker = executor.get_worker()
+        self.max_new_tokens = 256
+        self.eos_token_id = 2
+        self.device = torch.device(
+            "cuda:0" if torch.cuda.is_available() else "cpu"
+        )
+
+        self.executor = executor_class(vllm_config)
+        self.executor._init_executor()
+        self.worker = self.executor.get_worker()
 
         self._kv_metrics_collector = KVCacheMetricsCollector(sample_rate=0.1)
         block_pool = BlockPool(
-            num_kv_blocks, block_size, enable_caching=True,
+            cc.num_kv_blocks, cc.block_size,
+            enable_caching=cc.enable_prefix_caching,
             metrics_collector=self._kv_metrics_collector,
         )
         self.kv_cache_manager = KVCacheManager(block_pool=block_pool)
         self.scheduler = Scheduler(
-            max_running=max_running,
+            vllm_config=vllm_config,
             kv_cache_manager=self.kv_cache_manager,
         )
         self.finished: list[Request] = []
 
-        self.output_processor = OutputProcessor(tokenizer)
+        self.output_processor = OutputProcessor(
+            tokenizer=None
+        )  # tokenizer injected later if needed
 
         # C048: metrics
         self._step_count: int = 0
@@ -145,11 +156,12 @@ class EngineCore:
         iter_stats = IterationStats()
         num_prompt_tokens = scheduler_output.total_num_scheduled_tokens
         num_gen_tokens = sum(
-            len(tokens) for tokens in model_output.sampled_token_ids.values()
+            len(tokens) for tokens in model_output.sampled_token_ids
         )
 
         # Track TTFT: first token for each request
-        for rid, token_ids in model_output.sampled_token_ids.items():
+        for i, rid in enumerate(model_output.req_ids):
+            token_ids = model_output.sampled_token_ids[i]
             if rid in self._request_arrival and rid not in self._request_ttft:
                 if len(token_ids) > 0:
                     ttft = step_end - self._request_arrival[rid]

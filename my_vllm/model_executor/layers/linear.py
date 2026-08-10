@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from my_vllm.v1.distributed.parallel_state import (
+from my_vllm.distributed.parallel_state import (
     all_gather,
     all_reduce,
     get_tp_world_size,

@@ -1,8 +1,10 @@
 import enum
-import functools
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
+from my_vllm.v1.engine import FinishReason
 from my_vllm.v1.utils import ConstantList
 
 
@@ -29,6 +31,20 @@ class RequestStatus(enum.IntEnum):
     def is_finished(status: "RequestStatus") -> bool:
         return status > RequestStatus.PREEMPTED
 
+    @staticmethod
+    def get_finished_reason(status: "RequestStatus") -> FinishReason:
+        return _FINISHED_REASON_MAP.get(status, FinishReason.STOP)
+
+
+_FINISHED_REASON_MAP = {
+    RequestStatus.FINISHED_STOPPED: FinishReason.STOP,
+    RequestStatus.FINISHED_LENGTH_CAPPED: FinishReason.LENGTH,
+    RequestStatus.FINISHED_ABORTED: FinishReason.ABORT,
+    RequestStatus.FINISHED_IGNORED: FinishReason.LENGTH,
+    RequestStatus.FINISHED_ERROR: FinishReason.ERROR,
+    RequestStatus.FINISHED_REPETITION: FinishReason.REPETITION,
+}
+
 
 @dataclass
 class SamplingParams:
@@ -46,10 +62,6 @@ class Request:
     Mirrors vLLM V1's v1/request.py:59 — Request is a regular class
     (not a dataclass) to support ConstantList read-only views and
     controlled mutations via append_output_token_ids().
-
-    C015: adds 11 statuses, arrival_time, num_computed_tokens,
-    block_hashes, sampling_params, _all_token_ids, and ConstantList
-    wrappers.  Internal execution model is unchanged.
     """
 
     def __init__(
@@ -59,12 +71,15 @@ class Request:
         sampling_params: SamplingParams | None = None,
         arrival_time: float | None = None,
         priority: int = 0,
+        block_hasher: Callable[["Request"], list[bytes]] | None = None,
     ) -> None:
         self.request_id = request_id
         self.prompt_token_ids: list[int] = prompt_token_ids or []
         self.status = RequestStatus.WAITING
 
         self.sampling_params = sampling_params
+        self.pooling_params = None
+        self.lora_request = None
         self.arrival_time = (
             arrival_time if arrival_time is not None else time.time()
         )
@@ -76,6 +91,7 @@ class Request:
         self.num_computed_tokens: int = 0
         self.num_preemptions: int = 0
         self.block_hashes: list[bytes] = []
+        self._block_hasher: Callable[[Request], list[bytes]] | None = block_hasher
 
         self._output_token_ids: list[int] = []
         self._all_token_ids: list[int] = list(self.prompt_token_ids)
@@ -86,13 +102,11 @@ class Request:
         self.spec_token_ids: list[int] = []
         self.is_prefill_chunk: bool = False
 
-    def compute_block_hashes(self, block_size: int = 16) -> list[bytes]:
-        """Compute and cache hash for each block of prompt token IDs.
+        self.events: list = []
+        self.stop_reason: int | str | None = None
 
-        Each block's hash is derived from its token IDs.  Used by
-        KVCacheManager.get_computed_blocks() for prefix cache lookup.
-        Idempotent — only recomputes if block_hashes is empty.
-        """
+    def compute_block_hashes(self, block_size: int = 16) -> list[bytes]:
+        """Compute and cache hash for each block of prompt token IDs."""
         if self.block_hashes:
             return self.block_hashes
         if not self.prompt_token_ids:
@@ -134,7 +148,6 @@ class Request:
         return RequestStatus.is_finished(self.status)
 
     def __lt__(self, other: "Request") -> bool:
-        """Lower priority value = higher scheduling priority."""
         if self.priority != other.priority:
             return self.priority < other.priority
         return self.arrival_time > other.arrival_time

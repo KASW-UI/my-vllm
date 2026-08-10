@@ -6,31 +6,44 @@ RequestOutput from EngineCore.step().
 C026: InputProcessor handles prompt → tokenize → Request.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from my_vllm.v1.engine.core import EngineCore
 from my_vllm.v1.engine.input_processor import InputProcessor
 from my_vllm.v1.engine.output_processor import RequestOutput
+from my_vllm.v1.executor.abstract import Executor
 from my_vllm.v1.request import Request
+
+if TYPE_CHECKING:
+    from my_vllm.config.vllm import VllmConfig
 
 
 class LLMEngine:
     """High-level interface for LLM inference.
 
     Mirrors vLLM V1 v1/engine/llm_engine.py:48 (simplified).
+
+    Receives VllmConfig + executor_class, creates EngineCore internally.
     """
 
     def __init__(
         self,
-        engine_core: EngineCore,
+        vllm_config: VllmConfig,
+        executor_class: type[Executor],
         tokenizer,
     ):
-        self._engine_core = engine_core
         self._tokenizer = tokenizer
+        self._engine_core = EngineCore(
+            vllm_config=vllm_config,
+            executor_class=executor_class,
+        )
         self._pending: dict[str, Request] = {}
 
-        # C026: InputProcessor for prompt → Request conversion
         self._input_processor = InputProcessor(
             tokenizer,
-            default_max_tokens=engine_core.max_new_tokens,
+            default_max_tokens=self._engine_core.max_new_tokens,
         )
 
     def add_request(

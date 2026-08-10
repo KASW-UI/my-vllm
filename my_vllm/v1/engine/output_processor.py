@@ -84,7 +84,8 @@ class OutputProcessor:
         """
         outputs: list[RequestOutput] = []
 
-        for rid, token_ids in model_output.sampled_token_ids.items():
+        for i, rid in enumerate(model_output.req_ids):
+            token_ids = model_output.sampled_token_ids[i]
             req = req_map.get(rid)
             if req is None:
                 continue

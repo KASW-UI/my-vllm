@@ -8,40 +8,34 @@ C032: creates Worker internally — matches vLLM's executor-driven
 model loading chain.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from my_vllm.v1.executor.abstract import Executor
 from my_vllm.v1.outputs import ModelRunnerOutput
 from my_vllm.v1.worker.gpu_worker import Worker
 from my_vllm.v1.worker.worker_base import WorkerBase
 
+if TYPE_CHECKING:
+    from my_vllm.config.vllm import VllmConfig
+
 
 class UniProcExecutor(Executor):
     """Single-process executor — mirrors vLLM V1 UniProcExecutor.
 
-    C032: creates Worker and calls init_device() internally,
-    matching vLLM's _init_executor() → init_worker() → init_device()
-    → load_model() chain.
+    Receives VllmConfig via Executor.__init__, then _init_executor()
+    creates Worker and loads the model.
     """
 
-    def __init__(
-        self,
-        model_name: str = "facebook/opt-125m",
-        dtype_str: str = "bfloat16",
-        eos_token_id: int = 2,
-        block_size: int = 16,
-        max_num_blocks: int = 256,
-        max_num_reqs: int = 64,
-        rank: int = 0,
-        world_size: int = 1,
-    ):
+    def __init__(self, vllm_config: VllmConfig) -> None:
+        super().__init__(vllm_config)
         self._worker = Worker(
-            model_name=model_name,
-            dtype_str=dtype_str,
-            eos_token_id=eos_token_id,
-            block_size=block_size,
-            max_num_blocks=max_num_blocks,
-            max_num_reqs=max_num_reqs,
-            rank=rank,
-            world_size=world_size,
+            vllm_config=vllm_config,
+            local_rank=0,
+            rank=0,
+            distributed_init_method="env://",
+            is_driver_worker=True,
         )
 
     def _init_executor(self):

@@ -13,6 +13,10 @@ C032: model loading moved inside load_model() — Worker no longer
 receives pre-loaded model from outside.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 import torch
 import torch.nn as nn
 
@@ -23,40 +27,36 @@ from my_vllm.v1.attention.backends.ops.paged_attn import (
     reshape_and_cache_pytorch,
 )
 from my_vllm.v1.core.sched.output import SchedulerOutput
-from my_vllm.v1.model_executor.model_loader import load_model
+from my_vllm.model_executor.model_loader import load_model
 from my_vllm.v1.outputs import ModelRunnerOutput
 from my_vllm.v1.sample.metadata import SamplingMetadata
 from my_vllm.v1.sample.sampler import Sampler
 from my_vllm.v1.worker.gpu.block_table import BlockTables
 from my_vllm.v1.worker.gpu.states import RequestState
 
+if TYPE_CHECKING:
+    from my_vllm.config.vllm import VllmConfig
+
 
 class GPUModelRunner:
     """Batched model executor — mirrors vLLM V1 GPUModelRunner.
 
-    C032: receives EngineConfig and loads model internally via
-    load_model(), matching vLLM's model lifecycle architecture.
+    Receives VllmConfig + device, matching real vLLM's constructor pattern.
     """
 
-    def __init__(
-        self,
-        model_name: str,
-        dtype_str: str = "bfloat16",
-        eos_token_id: int = 2,
-        block_size: int = 16,
-        max_num_reqs: int = 64,
-        max_num_blocks: int = 256,
-        max_num_batched_tokens: int = 4096,
-        max_model_len: int = 4096,
-    ):
-        self.model_name = model_name
-        self.dtype_str = dtype_str
-        self.eos_token_id = eos_token_id
-        self.block_size = block_size
-        self.max_num_blocks = max_num_blocks
+    def __init__(self, vllm_config: VllmConfig, device: torch.device | None = None):
+        mc = vllm_config.model_config
+        cc = vllm_config.cache_config
+        sc = vllm_config.scheduler_config
+
+        self.model_name = mc.model_name
+        self.dtype_str = mc.dtype
+        self.eos_token_id = 2
+        self.block_size = cc.block_size
+        self.max_num_blocks = cc.num_kv_blocks
+        self.device = device
 
         self.model: nn.Module | None = None
-        self.device: torch.device | None = None
         self.num_layers: int = 0
         self.num_kv_heads: int = 0
         self.head_dim: int = 0
@@ -67,10 +67,10 @@ class GPUModelRunner:
         self.attn_metadata: CommonAttentionMetadata | None = None
 
         self._init_kwargs = dict(
-            max_num_reqs=max_num_reqs,
-            max_num_blocks=max_num_blocks,
-            max_num_batched_tokens=max_num_batched_tokens,
-            max_model_len=max_model_len,
+            max_num_reqs=sc.max_num_seqs,
+            max_num_blocks=cc.num_kv_blocks,
+            max_num_batched_tokens=sc.max_num_batched_tokens,
+            max_model_len=mc.max_model_len,
         )
 
     def load_model(self) -> None:
@@ -129,9 +129,12 @@ class GPUModelRunner:
             self.block_tables.append_block_ids(idx, d.block_ids)
             prefill_datas.append(d)
 
-        for rid, new_bids in scheduler_output.scheduled_cached_reqs.new_block_ids.items():
-            idx = self.request_state.get_index(rid)
-            self.block_tables.append_block_ids(idx, new_bids)
+        cached = scheduler_output.scheduled_cached_reqs
+        for i, rid in enumerate(cached.req_ids):
+            new_bids = cached.new_block_ids[i]
+            if new_bids is not None:
+                idx = self.request_state.get_index(rid)
+                self.block_tables.append_block_ids(idx, new_bids)
 
         if prefill_datas:
             prefill_results = self._prefill_batch(prefill_datas)
@@ -139,7 +142,7 @@ class GPUModelRunner:
                 self.request_state.set_last_sampled_token(rid, token)
                 sampled_tokens.setdefault(rid, []).append(token)
 
-        decode_req_ids = scheduler_output.scheduled_cached_reqs.req_ids
+        decode_req_ids = cached.req_ids
         if decode_req_ids:
             decode_results = self._decode_batch(decode_req_ids)
             for rid, token in decode_results.items():
@@ -147,9 +150,11 @@ class GPUModelRunner:
                     self.request_state.append_output_token(rid, token)
                     sampled_tokens.setdefault(rid, []).append(token)
 
+        req_ids = list(sampled_tokens.keys())
         return ModelRunnerOutput(
-            req_ids=list(sampled_tokens.keys()),
-            sampled_token_ids=sampled_tokens,
+            req_ids=req_ids,
+            req_id_to_index={rid: i for i, rid in enumerate(req_ids)},
+            sampled_token_ids=[sampled_tokens[rid] for rid in req_ids],
         )
 
     def _prefill_batch(self, new_datas: list) -> dict[str, int]:

@@ -106,7 +106,7 @@ MODEL = "/home/kasw/文档/GitHub/cpu-vllm/opt-125m"
 
 class TestSamplerIntegration:
     def test_gpu_model_runner_uses_sampler(self):
-        from my_vllm.v1.model_executor.model_loader import load_model
+        from my_vllm.model_executor.model_loader import load_model
         from my_vllm.runtime.tokenizer import load_tokenizer
         from my_vllm.v1.worker.gpu_model_runner import GPUModelRunner
         from my_vllm.v1.core.sched.output import (

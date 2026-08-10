@@ -16,7 +16,7 @@ class TestModelStateInterface:
             ModelState()
 
     def test_direct_model_state(self):
-        from my_vllm.v1.model_executor.model_loader import load_model
+        from my_vllm.model_executor.model_loader import load_model
         model = load_model(MODEL)
         device = next(model.parameters()).device
         ms = _DirectModelState(model, device)
@@ -24,7 +24,7 @@ class TestModelStateInterface:
         assert ms.get_device() == device
 
     def test_worker_with_model_state(self):
-        from my_vllm.v1.model_executor.model_loader import load_model
+        from my_vllm.model_executor.model_loader import load_model
         model = load_model(MODEL)
         device = next(model.parameters()).device
         ms = _DirectModelState(model, device)
@@ -35,7 +35,7 @@ class TestModelStateInterface:
         assert worker.get_step("nonexistent") == 0
 
     def test_worker_legacy_ctor(self):
-        from my_vllm.v1.model_executor.model_loader import load_model
+        from my_vllm.model_executor.model_loader import load_model
         model = load_model(MODEL)
         device = next(model.parameters()).device
         worker = Worker(model, device)

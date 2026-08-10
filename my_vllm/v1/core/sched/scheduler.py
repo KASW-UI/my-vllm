@@ -10,6 +10,10 @@ C051: multi-policy scheduling — FCFS/Priority via SchedulingPolicy.
 C052: preemption — _preempt_request frees KV blocks + resets tokens.
 """
 
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
 from my_vllm.v1.core.kv_cache_manager import KVCacheManager
 from my_vllm.v1.core.sched.interface import SchedulerInterface
 from my_vllm.v1.core.sched.output import (
@@ -21,8 +25,12 @@ from my_vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
     create_request_queue,
 )
-from my_vllm.v1.outputs import EngineCoreOutputs, ModelRunnerOutput
+from my_vllm.v1.engine import EngineCoreOutputs
+from my_vllm.v1.outputs import ModelRunnerOutput
 from my_vllm.v1.request import Request, RequestStatus
+
+if TYPE_CHECKING:
+    from my_vllm.config.vllm import VllmConfig
 
 
 class Scheduler(SchedulerInterface):
@@ -34,17 +42,21 @@ class Scheduler(SchedulerInterface):
 
     def __init__(
         self,
-        max_running: int = 8,
+        vllm_config: VllmConfig,
         kv_cache_manager: KVCacheManager | None = None,
-        max_num_batched_tokens: int = 2048,
-        policy: SchedulingPolicy = SchedulingPolicy.FCFS,
     ):
-        self.scheduling_policy = policy
-        self.waiting = create_request_queue(policy)
+        sc = vllm_config.scheduler_config
+
+        if sc.policy == "priority":
+            self.scheduling_policy = SchedulingPolicy.PRIORITY
+        else:
+            self.scheduling_policy = SchedulingPolicy.FCFS
+
+        self.waiting = create_request_queue(self.scheduling_policy)
         self.running: list[Request] = []
-        self.max_running = max_running
+        self.max_running = sc.max_num_seqs
         self.kv_cache_manager = kv_cache_manager
-        self.max_num_batched_tokens = max_num_batched_tokens
+        self.max_num_batched_tokens = sc.max_num_batched_tokens
 
     def add_request(self, request: Request):
         request.status = RequestStatus.WAITING
@@ -149,16 +161,14 @@ class Scheduler(SchedulerInterface):
         cached_data = CachedRequestData(
             req_ids=[r.request_id for r in self.running
                      if r.status != RequestStatus.PREEMPTED],
-            num_computed_tokens={
-                r.request_id: r.num_computed_tokens
-                for r in self.running
+            num_computed_tokens=[
+                r.num_computed_tokens for r in self.running
                 if r.status != RequestStatus.PREEMPTED
-            },
-            num_output_tokens={
-                r.request_id: r.num_output_tokens
-                for r in self.running
+            ],
+            num_output_tokens=[
+                r.num_output_tokens for r in self.running
                 if r.status != RequestStatus.PREEMPTED
-            },
+            ],
         )
 
         total_tokens = sum(
@@ -296,7 +306,8 @@ class Scheduler(SchedulerInterface):
     ) -> EngineCoreOutputs:
         """Detect finished requests from model output."""
         finished: list[Request] = []
-        for rid, token_ids in model_output.sampled_token_ids.items():
+        for i, rid in enumerate(model_output.req_ids):
+            token_ids = model_output.sampled_token_ids[i]
             req = self._find_request(rid)
             if req is None:
                 continue
@@ -311,7 +322,10 @@ class Scheduler(SchedulerInterface):
                 finished.append(req)
         return EngineCoreOutputs(
             finished_requests=finished,
-            sampled_token_ids=model_output.sampled_token_ids,
+            sampled_token_ids={
+                rid: model_output.sampled_token_ids[i]
+                for i, rid in enumerate(model_output.req_ids)
+            },
         )
 
     def _find_request(self, request_id: str) -> Request | None:

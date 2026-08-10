@@ -27,25 +27,30 @@ class NewRequestData:
 class CachedRequestData:
     """Diff data for requests already cached in the Worker.
 
-    Mirrors vLLM V1 v1/core/sched/output.py:116.
+    Mirrors vLLM V1 v1/core/sched/output.py:116 — uses index-aligned
+    parallel lists instead of dicts, matching real vLLM's IPC-optimized layout.
     """
 
     req_ids: list[str] = field(default_factory=list)
-    new_block_ids: dict[str, list[int]] = field(default_factory=dict)
-    num_computed_tokens: dict[str, int] = field(default_factory=dict)
-    num_output_tokens: dict[str, int] = field(default_factory=dict)
+    new_block_ids: list[list[int] | None] = field(default_factory=list)
+    num_computed_tokens: list[int] = field(default_factory=list)
+    num_output_tokens: list[int] = field(default_factory=list)
 
     @property
     def num_reqs(self) -> int:
         return len(self.req_ids)
 
+    @property
+    def req_id_to_index(self) -> dict[str, int]:
+        return {rid: i for i, rid in enumerate(self.req_ids)}
+
     @classmethod
     def make_empty(cls) -> "CachedRequestData":
         return cls(
             req_ids=[],
-            new_block_ids={},
-            num_computed_tokens={},
-            num_output_tokens={},
+            new_block_ids=[],
+            num_computed_tokens=[],
+            num_output_tokens=[],
         )
 
 

@@ -6,56 +6,61 @@ C032: Worker loads model internally via GPUModelRunner.load_model()
 — model is no longer passed in from run.py.  Matches vLLM lifecycle.
 """
 
-from my_vllm.v1.distributed.parallel_state import init_distributed
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from my_vllm.distributed.parallel_state import init_distributed
 from my_vllm.v1.outputs import ModelRunnerOutput
 from my_vllm.v1.worker.worker_base import WorkerBase
 from my_vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+if TYPE_CHECKING:
+    from my_vllm.config.vllm import VllmConfig
 
 
 class Worker(WorkerBase):
     """GPU Worker owning ModelRunner — mirrors vLLM V1 Worker.
 
-    C032: receives EngineConfig and creates GPUModelRunner internally.
-    The worker calls model_runner.load_model() during init_device(),
-    matching vLLM's deep model loading chain:
-    Executor → Worker.init_device() → GPUModelRunner.load_model()
+    Receives VllmConfig plus distributed params, matching real vLLM's
+    constructor pattern.
     """
 
     def __init__(
         self,
-        model_name: str = "facebook/opt-125m",
-        dtype_str: str = "bfloat16",
-        eos_token_id: int = 2,
-        block_size: int = 16,
-        max_num_blocks: int = 256,
-        max_num_reqs: int = 64,
-        rank: int = 0,
-        world_size: int = 1,
+        vllm_config: VllmConfig,
+        local_rank: int,
+        rank: int,
+        distributed_init_method: str,
+        is_driver_worker: bool = False,
     ):
-        super().__init__(rank=rank, world_size=world_size)
-
-        self.model_name = model_name
-        self.dtype_str = dtype_str
-        self.eos_token_id = eos_token_id
-        self.block_size = block_size
-        self.max_num_blocks = max_num_blocks
-        self.max_num_reqs = max_num_reqs
+        super().__init__(
+            vllm_config=vllm_config,
+            local_rank=local_rank,
+            rank=rank,
+            distributed_init_method=distributed_init_method,
+            is_driver_worker=is_driver_worker,
+        )
         self._model_runner: GPUModelRunner | None = None
 
     def init_device(self):
         """Mirrors vLLM Worker.init_device(): init dist + load model."""
         init_distributed(
-            world_size=self.world_size, rank=self.rank
+            world_size=self.parallel_config.world_size,
+            rank=self.rank,
         )
+        self.device = self._resolve_device(self.local_rank)
         self._model_runner = GPUModelRunner(
-            model_name=self.model_name,
-            dtype_str=self.dtype_str,
-            eos_token_id=self.eos_token_id,
-            block_size=self.block_size,
-            max_num_blocks=self.max_num_blocks,
-            max_num_reqs=self.max_num_reqs,
+            vllm_config=self.vllm_config,
+            device=self.device,
         )
         self._model_runner.load_model()
+
+    def _resolve_device(self, local_rank: int) -> torch.device:
+        import torch
+        if torch.cuda.is_available():
+            return torch.device(f"cuda:{local_rank}")
+        return torch.device("cpu")
 
     def _runner(self) -> GPUModelRunner:
         if self._model_runner is None:

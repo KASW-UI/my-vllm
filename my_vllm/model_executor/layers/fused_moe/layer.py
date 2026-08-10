@@ -3,8 +3,8 @@
 import torch
 import torch.nn as nn
 
-from my_vllm.v1.model_executor.layers.fused_moe.fused_moe import ExpertMLP, fused_moe
-from my_vllm.v1.model_executor.layers.fused_moe.router.fused_moe_router import (
+from my_vllm.model_executor.layers.fused_moe.fused_moe import ExpertMLP, fused_moe
+from my_vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
 

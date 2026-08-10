@@ -6,15 +6,21 @@ C080: spawns one Worker process per GPU rank, dispatches SchedulerOutput
 via pickle, collects ModelRunnerOutput.
 """
 
+from __future__ import annotations
+
 import multiprocessing as mp
 import signal
 from queue import Empty
+from typing import TYPE_CHECKING
 
 import torch
 
 from my_vllm.v1.executor.abstract import Executor
 from my_vllm.v1.outputs import ModelRunnerOutput
 from my_vllm.v1.worker.gpu_worker import Worker
+
+if TYPE_CHECKING:
+    from my_vllm.config.vllm import VllmConfig
 
 
 class MultiprocExecutor(Executor):
@@ -28,24 +34,9 @@ class MultiprocExecutor(Executor):
 
     supports_pp: bool = True
 
-    def __init__(
-        self,
-        model_name: str = "facebook/opt-125m",
-        dtype_str: str = "bfloat16",
-        eos_token_id: int = 2,
-        block_size: int = 16,
-        max_num_blocks: int = 256,
-        max_num_reqs: int = 64,
-        world_size: int = 1,
-    ):
-        super().__init__()
-        self.model_name = model_name
-        self.dtype_str = dtype_str
-        self.eos_token_id = eos_token_id
-        self.block_size = block_size
-        self.max_num_blocks = max_num_blocks
-        self.max_num_reqs = max_num_reqs
-        self.world_size = world_size
+    def __init__(self, vllm_config: VllmConfig):
+        super().__init__(vllm_config)
+        self.world_size = vllm_config.parallel_config.world_size
 
         self._workers: list[mp.Process] = []
         self._input_queues: list[mp.Queue] = []
@@ -56,15 +47,12 @@ class MultiprocExecutor(Executor):
         assert torch.cuda.is_available(), "MultiprocExecutor requires CUDA"
 
         for rank in range(self.world_size):
-            device = f"cuda:{rank}"
             input_q: mp.Queue = mp.Queue()
             output_q: mp.Queue = mp.Queue()
 
             proc = mp.Process(
                 target=_worker_main,
-                args=(rank, self.world_size, device,
-                      self.model_name, self.dtype_str, self.eos_token_id,
-                      self.block_size, self.max_num_blocks, self.max_num_reqs,
+                args=(rank, self.world_size, self.vllm_config,
                       input_q, output_q),
                 daemon=True,
             )
@@ -107,13 +95,7 @@ class MultiprocExecutor(Executor):
 def _worker_main(
     rank: int,
     world_size: int,
-    device: str,
-    model_name: str,
-    dtype_str: str,
-    eos_token_id: int,
-    block_size: int,
-    max_num_blocks: int,
-    max_num_reqs: int,
+    vllm_config: VllmConfig,
     input_q: mp.Queue,
     output_q: mp.Queue,
 ) -> None:
@@ -123,17 +105,14 @@ def _worker_main(
     then loops: receive SchedulerOutput → execute_model → send output.
     """
     signal.signal(signal.SIGINT, signal.SIG_IGN)
-    torch.cuda.set_device(device)
+    torch.cuda.set_device(f"cuda:{rank}")
 
     worker = Worker(
-        model_name=model_name,
-        dtype_str=dtype_str,
-        eos_token_id=eos_token_id,
-        block_size=block_size,
-        max_num_blocks=max_num_blocks,
-        max_num_reqs=max_num_reqs,
+        vllm_config=vllm_config,
+        local_rank=rank,
         rank=rank,
-        world_size=world_size,
+        distributed_init_method="env://",
+        is_driver_worker=(rank == 0),
     )
     worker.init_device()
 

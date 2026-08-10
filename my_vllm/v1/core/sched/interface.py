@@ -15,7 +15,8 @@ Subclasses must implement:
 from abc import ABC, abstractmethod
 
 from my_vllm.v1.core.sched.output import SchedulerOutput
-from my_vllm.v1.outputs import EngineCoreOutputs, ModelRunnerOutput
+from my_vllm.v1.engine import EngineCoreOutputs
+from my_vllm.v1.outputs import ModelRunnerOutput
 from my_vllm.v1.request import Request, RequestStatus
 
 

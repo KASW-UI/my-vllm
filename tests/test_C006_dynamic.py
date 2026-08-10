@@ -1,5 +1,5 @@
 from my_vllm.runtime.tokenizer import load_tokenizer
-from my_vllm.v1.model_executor.model_loader import load_model
+from my_vllm.model_executor.model_loader import load_model
 from my_vllm.v1.request import Request, RequestStatus
 from my_vllm.v1.engine.core import EngineCore as StateManager
 from my_vllm.v1.worker.gpu_worker import Worker

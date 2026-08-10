@@ -1,54 +1,63 @@
-"""WorkerBase — abstract worker interface with execute_model().
+"""WorkerBase — worker interface with execute_model().
 
-Mirrors vLLM V1 v1/worker/worker_base.py:39.
+Mirrors vLLM V1 v1/worker/worker_base.py:45.
 
 C017: adds execute_model(SchedulerOutput) → ModelRunnerOutput
-as the primary execution interface.  Legacy methods retained
-for backward compatibility.
+as the primary execution interface.
 """
 
-from abc import ABC, abstractmethod
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 
 import torch
 
 from my_vllm.v1.outputs import ModelRunnerOutput
 
+if TYPE_CHECKING:
+    from my_vllm.config.vllm import VllmConfig
 
-class WorkerBase(ABC):
+
+class WorkerBase:
+    """Worker interface for different hardware.
+
+    Mirrors vLLM V1 WorkerBase — NOT an ABC. Uses raise NotImplementedError
+    pattern for methods that subclasses must override.
+    """
+
     def __init__(
         self,
-        rank: int = 0,
-        world_size: int = 1,
-    ):
+        vllm_config: VllmConfig,
+        local_rank: int,
+        rank: int,
+        distributed_init_method: str,
+        is_driver_worker: bool = False,
+    ) -> None:
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.cache_config = vllm_config.cache_config
+        self.parallel_config = vllm_config.parallel_config
+        self.scheduler_config = vllm_config.scheduler_config
+        self.local_rank = local_rank
         self.rank = rank
-        self.world_size = world_size
+        self.distributed_init_method = distributed_init_method
+        self.is_driver_worker = is_driver_worker
+        self.device: torch.device | None = None
+        self.model_runner = None
 
-    @abstractmethod
-    def init_device(self): ...
+    def init_device(self):
+        raise NotImplementedError
 
-    @abstractmethod
     def execute_model(
         self, scheduler_output
     ) -> ModelRunnerOutput | None:
-        """Execute a batch of requests through the model.
+        raise NotImplementedError
 
-        Args:
-            scheduler_output: structured scheduling output with
-                new and cached request metadata.
+    def get_step(self, request_id: str) -> int:
+        raise NotImplementedError
 
-        Returns:
-            ModelRunnerOutput with sampled token IDs per request.
-        """
-        ...
-
-    @abstractmethod
-    def get_step(self, request_id: str) -> int: ...
-
-    @abstractmethod
-    def cleanup(self, request_id: str): ...
-
-    # Legacy bridge — still referenced by old code.
-    # Will be removed after C018 when full execute_model replaces them.
+    def cleanup(self, request_id: str):
+        raise NotImplementedError
 
     def execute_prefill(
         self, request_id: str,
