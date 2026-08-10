@@ -5,6 +5,7 @@ import torch
 
 from my_vllm.v1.core.block_pool import BlockPool
 from my_vllm.v1.core.kv_cache_manager import KVCacheManager
+from my_vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from my_vllm.v1.core.sched.scheduler import Scheduler
 from my_vllm.v1.engine.output_processor import OutputProcessor, RequestOutput
 from my_vllm.v1.executor.abstract import Executor
@@ -46,7 +47,11 @@ class EngineCore:
         self.executor = executor
         self.worker = executor.get_worker()
 
-        block_pool = BlockPool(num_kv_blocks, block_size, enable_caching=True)
+        self._kv_metrics_collector = KVCacheMetricsCollector(sample_rate=0.1)
+        block_pool = BlockPool(
+            num_kv_blocks, block_size, enable_caching=True,
+            metrics_collector=self._kv_metrics_collector,
+        )
         self.kv_cache_manager = KVCacheManager(block_pool=block_pool)
         self.scheduler = Scheduler(
             max_running=max_running,
@@ -121,6 +126,9 @@ class EngineCore:
         step_start: float,
         step_end: float,
     ) -> None:
+        # Drain KV cache eviction events
+        eviction_events = self._kv_metrics_collector.drain_events()
+
         # Build SchedulerStats
         kv_usage = 1.0 - (self.kv_cache_manager.num_free_blocks /
                           self.kv_cache_manager.block_pool.num_blocks)
@@ -130,6 +138,7 @@ class EngineCore:
             num_waiting_reqs=len(self.scheduler.waiting),
             kv_cache_usage=kv_usage,
             prefix_cache_stats=cache_stats,
+            kv_cache_eviction_events=eviction_events,
         )
 
         # Build IterationStats

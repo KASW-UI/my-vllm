@@ -11,10 +11,14 @@ and records KVCacheBlockCopy for the Worker to execute.
 """
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from my_vllm.v1.core.block_pool import BlockPool
 from my_vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy
 from my_vllm.v1.request import Request
+
+if TYPE_CHECKING:
+    from my_vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 
 
 @dataclass

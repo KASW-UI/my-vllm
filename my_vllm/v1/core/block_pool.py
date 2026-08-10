@@ -8,12 +8,17 @@ evict_blocks(), and ref_cnt-aware allocation.
 
 C035: BlockHashToBlockMap (hash→list[block] for collision handling),
 ref_cnt cascading release in free_blocks() for GC.
+
+C054: KVCacheMetricsCollector integration — on_block_allocated/accessed/evicted.
 """
 
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from my_vllm.v1.core.kv_cache_utils import FreeKVCacheBlockQueue, KVCacheBlock
 from my_vllm.v1.request import Request
+
+if TYPE_CHECKING:
+    from my_vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 
 
 class BlockHashToBlockMap:
@@ -106,11 +111,13 @@ class BlockPool:
         num_blocks: int,
         block_size: int = 16,
         enable_caching: bool = False,
+        metrics_collector: "KVCacheMetricsCollector | None" = None,
     ):
         assert num_blocks > 0
         self.block_size = block_size
         self.num_blocks = num_blocks
         self.enable_caching = enable_caching
+        self.metrics_collector = metrics_collector
 
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(block_id=idx) for idx in range(num_blocks)
@@ -127,22 +134,19 @@ class BlockPool:
         for b in blocks:
             b._is_free = False
             b.ref_cnt = 1
+            if self.metrics_collector is not None:
+                self.metrics_collector.on_block_allocated(b)
         return blocks
 
     def free_blocks(self, blocks: list[KVCacheBlock]):
-        """Return blocks to the free queue with ref_cnt cascading release.
-
-        C035: decrements ref_cnt instead of setting to 0.
-        Blocks are only truly freed when ref_cnt reaches 0.
-        Blocks with a hash stay in the prefix cache as LRU eviction
-        candidates (like vLLM) — they may be re-used by other requests
-        until actually evicted from the free queue.
-        """
+        """Return blocks to the free queue with ref_cnt cascading release."""
         for b in blocks:
             if b.ref_cnt > 0:
                 b.ref_cnt -= 1
             if b.ref_cnt == 0:
                 b._is_free = True
+                if b.block_hash is not None and self.metrics_collector is not None:
+                    self.metrics_collector.on_block_evicted(b)
                 self.free_block_queue.append(b)
 
     def touch(self, blocks: list[KVCacheBlock]):
@@ -151,6 +155,8 @@ class BlockPool:
             self.free_block_queue.remove(b)
         for b in blocks:
             self.free_block_queue.append(b)
+            if self.metrics_collector is not None:
+                self.metrics_collector.on_block_accessed(b)
 
     def get_cached_block(self, block_hash: bytes) -> KVCacheBlock | None:
         """Look up a block by its hash (prefix cache)."""

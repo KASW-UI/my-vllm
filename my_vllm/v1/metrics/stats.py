@@ -8,6 +8,15 @@ from dataclasses import dataclass, field
 
 
 @dataclass
+class KVCacheEvictionEvent:
+    """Single KV cache block eviction sample — aligns with vLLM KVCacheEvictionEvent."""
+
+    lifetime_seconds: float
+    idle_seconds: float
+    reuse_gaps_seconds: tuple[float, ...]
+
+
+@dataclass
 class SchedulerStats:
     """Aggregated scheduler state — aligns with vLLM SchedulerStats."""
 
@@ -15,6 +24,9 @@ class SchedulerStats:
     num_waiting_reqs: int = 0
     kv_cache_usage: float = 0.0  # 0.0 .. 1.0
     prefix_cache_stats: "PrefixCacheStats | None" = None
+    kv_cache_eviction_events: list[KVCacheEvictionEvent] = field(
+        default_factory=list
+    )
 
     def __repr__(self) -> str:
         return (

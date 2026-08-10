@@ -214,6 +214,7 @@ When implementing a new stage, follow this exact sequence:
 - Tensor parallel stubs degrade to identity when `world_size=1`
 - KVCacheSpec hierarchy: FullAttentionSpec (packed K/V, head_size_v), SlidingWindowSpec (swa window), MLAAttentionSpec (cache_dtype_str), 聚合类型 KVCacheGroupSpec 将同 typespec 层分组
 - Metrics: TTFT, TPOT, ITL, throughput, KV cache utilization
+- KV Metrics: KVCacheMetricsCollector, BlockMetricsState — reuse interval, residency, eviction count, prefix cache hit rate
 
 ## Model dependency
 
