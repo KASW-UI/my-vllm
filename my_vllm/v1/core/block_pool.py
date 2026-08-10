@@ -132,31 +132,56 @@ class BlockPool:
             return None
         blocks = list(self.free_block_queue.popleft_n(n))
         for b in blocks:
+            self._maybe_evict_cached_block(b)
             b._is_free = False
             b.ref_cnt = 1
             if self.metrics_collector is not None:
                 self.metrics_collector.on_block_allocated(b)
         return blocks
 
+    def _maybe_evict_cached_block(self, block: KVCacheBlock) -> None:
+        """Evict stale hash entries when a block is re-allocated."""
+        if not self.enable_caching:
+            return
+        old_hash = block.block_hash
+        if old_hash is not None:
+            self.cached_block_hash_to_block.pop(old_hash, block.block_id)
+            block.reset_hash()
+
     def free_blocks(self, blocks: list[KVCacheBlock]):
-        """Return blocks to the free queue with ref_cnt cascading release."""
+        """Return blocks to free queue with eviction-order split.
+
+        Mirrors vLLM V1 BlockPool.free_blocks(): blocks without hash
+        are prepended (evicted first), blocks with hash are appended
+        (evicted last, preserved for prefix cache reuse).
+        """
+        blocks_with_hash: list[KVCacheBlock] = []
+        blocks_without_hash: list[KVCacheBlock] = []
         for b in blocks:
             if b.ref_cnt > 0:
                 b.ref_cnt -= 1
-            if b.ref_cnt == 0:
+            if b.ref_cnt == 0 and not b.is_null:
                 b._is_free = True
-                if b.block_hash is not None and self.metrics_collector is not None:
-                    self.metrics_collector.on_block_evicted(b)
-                self.free_block_queue.append(b)
+                if b.block_hash is not None:
+                    blocks_with_hash.append(b)
+                else:
+                    blocks_without_hash.append(b)
+        self.free_block_queue.prepend_n(blocks_without_hash)
+        for b in blocks_with_hash:
+            self.free_block_queue.append(b)
 
     def touch(self, blocks: list[KVCacheBlock]):
-        """Refresh eviction position (move to tail)."""
+        """Pin cached blocks by removing from free list and incrementing ref_cnt.
+
+        Mirrors vLLM V1 BlockPool.touch(): only operates on free blocks
+        (ref_cnt == 0), increments ref_cnt to prevent eviction.
+        """
         for b in blocks:
-            self.free_block_queue.remove(b)
-        for b in blocks:
-            self.free_block_queue.append(b)
-            if self.metrics_collector is not None:
-                self.metrics_collector.on_block_accessed(b)
+            if b.ref_cnt == 0 and not b.is_null:
+                self.free_block_queue.remove(b)
+                b.ref_cnt += 1
+                if self.metrics_collector is not None:
+                    self.metrics_collector.on_block_accessed(b)
 
     def get_cached_block(self, block_hash: bytes) -> KVCacheBlock | None:
         """Look up a block by its hash (prefix cache)."""

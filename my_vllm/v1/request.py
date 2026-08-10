@@ -150,7 +150,11 @@ class Request:
     def __lt__(self, other: "Request") -> bool:
         if self.priority != other.priority:
             return self.priority < other.priority
-        return self.arrival_time > other.arrival_time
+        if self.arrival_time != other.arrival_time:
+            return self.arrival_time < other.arrival_time
+        if self.request_id != other.request_id:
+            return self.request_id < other.request_id
+        return id(self) < id(other)
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Request):

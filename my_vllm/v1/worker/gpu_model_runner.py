@@ -2,21 +2,21 @@
 
 Mirrors vLLM V1 v1/worker/gpu_model_runner.py core structure.
 
-C017: replaces per-request prefill/decode with batched prefill
-and centralized decode.
+C017: replaces per-request prefill/decode with batched prefill and centralized decode.
 C019: adds BlockTables GPU tensor management.
 C020: RequestState replaces Python dicts for per-request state.
 C022: builds CommonAttentionMetadata from InputBatch + BlockTables.
 C023: physical KV cache pool replaces HF past_key_values.
 C024: Sampler (nn.Module) replaces greedy_sample() function.
-C032: model loading moved inside load_model() — Worker no longer
-receives pre-loaded model from outside.
+C032: model loading moved inside load_model().
+Unified batching: positions = num_computed_tokens + local_offset (aligned with vLLM L1985).
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -47,10 +47,7 @@ def _str_to_torch_dtype(dtype_str: str) -> torch.dtype:
 
 
 class GPUModelRunner:
-    """Batched model executor — mirrors vLLM V1 GPUModelRunner.
-
-    Receives VllmConfig + device, matching real vLLM's constructor pattern.
-    """
+    """Batched model executor — mirrors vLLM V1 GPUModelRunner."""
 
     _EOS_TOKEN_ID = 2
 
@@ -83,12 +80,6 @@ class GPUModelRunner:
         )
 
     def load_model(self) -> None:
-        """Load model internally — mirrors vLLM GPUModelRunner.load_model().
-
-        Called by Worker.init_device() during executor initialization.
-        The model is loaded deep inside the ModelRunner, not passed in
-        from run.py.
-        """
         model = load_model(self.model_name, dtype=self.dtype_str)
         self.model = model
         self.device = next(model.parameters()).device
@@ -128,32 +119,22 @@ class GPUModelRunner:
     def execute_model(
         self, scheduler_output: SchedulerOutput
     ) -> ModelRunnerOutput:
+        self._update_states(scheduler_output)
+
         sampled_tokens: dict[str, list[int]] = {}
 
-        prefill_datas = []
-        for d in scheduler_output.scheduled_new_reqs:
-            if d.req_id not in self.request_state.req_id_to_index:
-                self.request_state.add_request(d.req_id, d.prompt_token_ids)
-            idx = self.request_state.get_index(d.req_id)
-            self.block_tables.append_block_ids(idx, d.block_ids)
-            prefill_datas.append(d)
-
+        new_reqs = scheduler_output.scheduled_new_reqs
         cached = scheduler_output.scheduled_cached_reqs
-        for i, rid in enumerate(cached.req_ids):
-            new_bids = cached.new_block_ids[i]
-            if new_bids is not None:
-                idx = self.request_state.get_index(rid)
-                self.block_tables.append_block_ids(idx, new_bids)
 
-        if prefill_datas:
-            prefill_results = self._prefill_batch(prefill_datas)
+        if new_reqs:
+            prefill_results = self._execute_prefill(new_reqs)
             for rid, token in prefill_results.items():
                 self.request_state.set_last_sampled_token(rid, token)
                 sampled_tokens.setdefault(rid, []).append(token)
 
         decode_req_ids = cached.req_ids
         if decode_req_ids:
-            decode_results = self._decode_batch(decode_req_ids)
+            decode_results = self._execute_decode(decode_req_ids)
             for rid, token in decode_results.items():
                 if token is not None:
                     self.request_state.append_output_token(rid, token)
@@ -166,13 +147,25 @@ class GPUModelRunner:
             sampled_token_ids=[sampled_tokens[rid] for rid in req_ids],
         )
 
-    def _prefill_batch(self, new_datas: list) -> dict[str, int]:
+    def _update_states(self, scheduler_output: SchedulerOutput) -> None:
+        for d in scheduler_output.scheduled_new_reqs:
+            if d.req_id not in self.request_state.req_id_to_index:
+                self.request_state.add_request(d.req_id, d.prompt_token_ids)
+            idx = self.request_state.get_index(d.req_id)
+            self.block_tables.append_block_ids(idx, d.block_ids)
+
+        cached = scheduler_output.scheduled_cached_reqs
+        for i, rid in enumerate(cached.req_ids):
+            new_bids = cached.new_block_ids[i]
+            if new_bids is not None:
+                idx = self.request_state.get_index(rid)
+                self.block_tables.append_block_ids(idx, new_bids)
+
+    def _execute_prefill(self, new_datas: list) -> dict[str, int]:
         results: dict[str, int] = {}
         if not new_datas:
             return results
 
-        # C030: support chunked prefill — compute effective (uncached) prompt
-        # length per request based on num_computed_tokens
         effective_lens = []
         for d in new_datas:
             start = d.num_computed_tokens
@@ -182,11 +175,9 @@ class GPUModelRunner:
         batch_size = len(new_datas)
 
         input_ids = torch.zeros(
-            batch_size, max_len, dtype=torch.long, device=self.device,
-        )
+            batch_size, max_len, dtype=torch.long, device=self.device)
         attention_mask = torch.zeros(
-            batch_size, max_len, dtype=torch.long, device=self.device,
-        )
+            batch_size, max_len, dtype=torch.long, device=self.device)
 
         req_ids = []
         for i, d in enumerate(new_datas):
@@ -194,20 +185,18 @@ class GPUModelRunner:
             chunk = d.prompt_token_ids[start:]
             clen = len(chunk)
             input_ids[i, :clen] = torch.tensor(
-                chunk, dtype=torch.long, device=self.device,
-            )
+                chunk, dtype=torch.long, device=self.device)
             attention_mask[i, :clen] = 1
             req_ids.append(d.req_id)
 
         positions_tensor = torch.zeros(
-            batch_size, max_len, dtype=torch.long, device=self.device,
-        )
+            batch_size, max_len, dtype=torch.long, device=self.device)
         for i, d in enumerate(new_datas):
             start = d.num_computed_tokens
             clen = effective_lens[i]
             positions_tensor[i, :clen] = torch.arange(
-                start, start + clen, dtype=torch.long, device=self.device,
-            )
+                start, start + clen, dtype=torch.long, device=self.device)
+
         query_start = torch.tensor(
             [0] + effective_lens,
             dtype=torch.long, device=self.device,
@@ -235,56 +224,19 @@ class GPUModelRunner:
         logits = outputs.logits
         past_kvs = outputs.past_key_values
 
-        self._write_kv_to_physical_cache(past_kvs, new_datas, batch_size, effective_lens)
+        self._write_kv_to_paged_cache(past_kvs, new_datas, batch_size, effective_lens)
 
-        # C024: use Sampler — logits at the last effective token position
         token_logits = torch.stack(
-            [logits[i, effective_lens[i] - 1, :]
-             for i in range(batch_size)]
-        )  # [batch_size, vocab_size]
+            [logits[i, effective_lens[i] - 1, :] for i in range(batch_size)])
 
-        sampling_meta = SamplingMetadata(all_greedy=True)
-        sampled = self.sampler(token_logits, sampling_meta)
+        sampled = self.sampler(token_logits, SamplingMetadata(all_greedy=True))
 
         for i, rid in enumerate(req_ids):
             results[rid] = int(sampled[i].item())
 
         return results
 
-    def _write_kv_to_physical_cache(
-        self, past_key_values, new_datas: list, batch_size: int,
-        effective_lens: list[int] = None,
-    ) -> None:
-        """Write HF past_key_values into physical GPU KV cache via slot_mapping.
-        """
-        if effective_lens is None:
-            effective_lens = [len(d.prompt_token_ids) for d in new_datas]
-        padded_len = max(effective_lens)
-        total_tokens = batch_size * padded_len
-        slot_map = self.block_tables.slot_mappings[:total_tokens]
-
-        valid = torch.zeros(total_tokens, dtype=torch.bool, device=self.device)
-        offset = 0
-        for plen in effective_lens:
-            valid[offset:offset + plen] = True
-            offset += padded_len
-
-        for layer_idx, (layer_k, layer_v) in enumerate(past_key_values):
-            bsz, nheads, _, hdim = layer_k.shape
-            k_flat = layer_k.permute(0, 2, 1, 3).reshape(
-                bsz * padded_len, nheads, hdim,
-            )
-            v_flat = layer_v.permute(0, 2, 1, 3).reshape(
-                bsz * padded_len, nheads, hdim,
-            )
-            reshape_and_cache_pytorch(
-                k_flat[valid], v_flat[valid],
-                self.kv_cache_k[layer_idx],
-                self.kv_cache_v[layer_idx],
-                slot_map[valid],
-            )
-
-    def _decode_batch(self, req_ids: list[str]) -> dict[str, int | None]:
+    def _execute_decode(self, req_ids: list[str]) -> dict[str, int | None]:
         results: dict[str, int | None] = {}
         if not req_ids:
             return results
@@ -308,8 +260,7 @@ class GPUModelRunner:
         num_reqs = len(valid_reqs)
         seq_lens = torch.tensor(
             [int(self.request_state.num_computed_tokens_cpu[
-                self.request_state.get_index(r)
-            ]) for r in valid_reqs],
+                self.request_state.get_index(r)]) for r in valid_reqs],
             dtype=torch.int32, device=self.device,
         )
 
@@ -325,8 +276,7 @@ class GPUModelRunner:
         past_key_values = tuple(past_key_values)
 
         next_inputs = torch.tensor(
-            [[t] for t in valid_tokens], dtype=torch.long, device=self.device,
-        )
+            [[t] for t in valid_tokens], dtype=torch.long, device=self.device)
 
         with torch.no_grad():
             outputs = self.model(
@@ -335,15 +285,10 @@ class GPUModelRunner:
                 use_cache=True,
             )
 
-        logits_all = outputs.logits  # [batch, 1, vocab]
+        logits_flat = outputs.logits[:, -1, :]
         new_past_kvs = outputs.past_key_values
+        sampled = self.sampler(logits_flat, SamplingMetadata(all_greedy=True))
 
-        # C024: batch sample using Sampler
-        logits_flat = logits_all[:, -1, :]  # [num_reqs, vocab_size]
-        sampling_meta = SamplingMetadata(all_greedy=True)
-        sampled = self.sampler(logits_flat, sampling_meta)
-
-        # Write new decode K/V to physical cache via slot mapping
         decode_slots = []
         for i, rid in enumerate(valid_reqs):
             idx = self.request_state.get_index(rid)
@@ -351,13 +296,12 @@ class GPUModelRunner:
             block_index = old_seq_len // self.block_size
             block_offset = old_seq_len % self.block_size
             block_id = int(
-                self.block_tables.block_table[idx, block_index].item()
-            )
+                self.block_tables.block_table[idx, block_index].item())
             decode_slots.append(block_id * self.block_size + block_offset)
 
         slot_tensor = torch.tensor(decode_slots, dtype=torch.int64, device=self.device)
         for layer_idx, (layer_k, layer_v) in enumerate(new_past_kvs):
-            k_last = layer_k[:, :, -1, :]  # [batch, nheads, hdim]
+            k_last = layer_k[:, :, -1, :]
             v_last = layer_v[:, :, -1, :]
             reshape_and_cache_pytorch(
                 k_last, v_last,
@@ -369,13 +313,41 @@ class GPUModelRunner:
         for i, rid in enumerate(valid_reqs):
             next_token = int(sampled[i].item())
             self.request_state.set_last_sampled_token(rid, next_token)
-
             if next_token == self._EOS_TOKEN_ID:
                 results[rid] = None
             else:
                 results[rid] = next_token
 
         return results
+
+    def _write_kv_to_paged_cache(
+        self, past_key_values, new_datas: list, batch_size: int,
+        effective_lens: list[int] = None,
+    ) -> None:
+        if effective_lens is None:
+            effective_lens = [len(d.prompt_token_ids) for d in new_datas]
+        padded_len = max(effective_lens)
+        total_tokens = batch_size * padded_len
+        slot_map = self.block_tables.slot_mappings[:total_tokens]
+
+        valid = torch.zeros(total_tokens, dtype=torch.bool, device=self.device)
+        offset = 0
+        for plen in effective_lens:
+            valid[offset:offset + plen] = True
+            offset += padded_len
+
+        for layer_idx, (layer_k, layer_v) in enumerate(past_key_values):
+            bsz, nheads, _, hdim = layer_k.shape
+            k_flat = layer_k.permute(0, 2, 1, 3).reshape(
+                bsz * padded_len, nheads, hdim)
+            v_flat = layer_v.permute(0, 2, 1, 3).reshape(
+                bsz * padded_len, nheads, hdim)
+            reshape_and_cache_pytorch(
+                k_flat[valid], v_flat[valid],
+                self.kv_cache_k[layer_idx],
+                self.kv_cache_v[layer_idx],
+                slot_map[valid],
+            )
 
     def _build_attn_metadata(
         self,

@@ -90,17 +90,23 @@ class KVCacheManager:
         C029: walks request.block_hashes from the start. C036: CoW —
         bumps ref_cnt on reuse, clones shared blocks (ref_cnt>1) to
         prevent cross-request KV cache pollution, and records KVCacheBlockCopy.
+
+        Aligned with vLLM: stops at max_cache_hit_length = num_tokens - 1
+        (reserves last token for fresh logit computation).
         """
         if not self.block_pool.enable_caching:
             return KVCacheBlocks.empty(), 0
 
         block_size = self.block_pool.block_size
+        max_cache_hit_length = max(0, request.num_tokens - 1)
         request.compute_block_hashes(block_size)
         cached_blocks: list[KVCacheBlock] = []
         num_computed = 0
 
         for block_hash in request.block_hashes:
             if not block_hash:
+                break
+            if num_computed >= max_cache_hit_length:
                 break
             cached = self.block_pool.get_cached_block(block_hash)
             if cached is None:
@@ -110,7 +116,7 @@ class KVCacheManager:
             cached_blocks.append(private)
             num_computed += min(
                 block_size,
-                len(request.prompt_token_ids) - num_computed,
+                request.num_tokens - num_computed,
             )
 
         if cached_blocks:

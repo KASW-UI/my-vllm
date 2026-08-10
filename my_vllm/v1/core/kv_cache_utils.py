@@ -145,6 +145,28 @@ class FreeKVCacheBlockQueue:
         self.fake_free_list_tail.prev_free_block = block
         self.num_free_blocks += 1
 
+    def prepend_n(self, blocks: list[KVCacheBlock]) -> None:
+        """Prepend blocks to the head (eviction front, O(n))."""
+        if not blocks:
+            return
+        for i, blk in enumerate(blocks):
+            if i > 0:
+                blk.prev_free_block = blocks[i - 1]
+                blocks[i - 1].next_free_block = blk
+            else:
+                blk.prev_free_block = None
+            if i < len(blocks) - 1:
+                blk.next_free_block = blocks[i + 1]
+            else:
+                blk.next_free_block = None
+        old_first = self.fake_free_list_head.next_free_block
+        self.fake_free_list_head.next_free_block = blocks[0]
+        blocks[0].prev_free_block = self.fake_free_list_head
+        blocks[-1].next_free_block = old_first
+        if old_first is not None:
+            old_first.prev_free_block = blocks[-1]
+        self.num_free_blocks += len(blocks)
+
     def clear(self) -> None:
         """Clear the free list."""
         self.fake_free_list_head.next_free_block = self.fake_free_list_tail
