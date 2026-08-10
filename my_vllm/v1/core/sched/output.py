@@ -2,6 +2,7 @@
 
 C016: enhanced from C015 placeholder to full definition.
 These structs are now the return type of Scheduler.schedule().
+C038: num_common_prefix_blocks tracks per-request shared prefix cache hits.
 """
 
 from dataclasses import dataclass, field
@@ -55,6 +56,7 @@ class SchedulerOutput:
     C016: Scheduler.schedule() now returns this struct instead of
     list[Request].  EngineCore uses scheduled_new_reqs to identify
     which requests need prefill and scheduled_cached_reqs for decode.
+    C038: num_common_prefix_blocks reports per-request prefix cache hit count.
     """
 
     scheduled_new_reqs: list[NewRequestData] = field(default_factory=list)
@@ -66,6 +68,7 @@ class SchedulerOutput:
     finished_req_ids: set[str] = field(default_factory=set)
     new_block_ids_to_zero: list[int] | None = None
     preempted_req_ids: set[str] | None = None
+    num_common_prefix_blocks: list[int] = field(default_factory=list)
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":

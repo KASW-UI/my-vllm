@@ -5,6 +5,7 @@ C029: prefix cache lookup via KVCacheManager.get_computed_blocks().
 C030: chunked prefill — long prompts split by token_budget;
       num_computed_tokens tracks prefill progress per-chunk.
 C037: implements SchedulerInterface ABC for standardized contract.
+C038: resource model — explicit GPU/KV/token budget checks.
 """
 
 from my_vllm.v1.core.kv_cache_manager import KVCacheManager
@@ -20,11 +21,12 @@ from my_vllm.v1.request import Request, RequestStatus
 
 
 class Scheduler(SchedulerInterface):
-    """FCFS scheduler with chunked prefill (C030).
+    """FCFS scheduler with chunked prefill, prefix cache, and resource model.
 
-    max_num_batched_tokens limits per-step prefill tokens.
-    Long prompts are split across multiple steps; after each
-    chunk the request remains running for decode interleaving.
+    C038: schedule() checks three resource budgets before admitting requests:
+        - GPU budget: max_num_seqs (running count vs max_running)
+        - KV budget: sufficient free blocks for the request's tokens
+        - Token budget: num_scheduled_tokens <= max_num_batched_tokens
     """
 
     def __init__(
@@ -47,6 +49,7 @@ class Scheduler(SchedulerInterface):
         token_budget = self.max_num_batched_tokens
         new_req_datas: list[NewRequestData] = []
         new_blocks: dict[str, list[int]] = {}
+        num_common_prefix_blocks: list[int] = []
 
         # C030: handle running requests that still need prefill (chunk continue)
         for req in self.running:
@@ -64,7 +67,7 @@ class Scheduler(SchedulerInterface):
                 req.num_computed_tokens < len(req.prompt_token_ids)
             )
 
-            # Allocate additional blocks if needed for the new tokens
+            # KV budget: allocate additional blocks for chunked tokens
             if self.kv_cache_manager is not None:
                 blocks = self.kv_cache_manager.allocate_slots(
                     req, req.num_computed_tokens
@@ -82,21 +85,28 @@ class Scheduler(SchedulerInterface):
             ))
 
         # Pull new requests from waiting queue
-        while len(self.running) < self.max_running and self.waiting and token_budget > 0:
+        while self.waiting:
+            if not self._has_gpu_budget():
+                break
+            if not self._has_token_budget(token_budget):
+                break
+
             req = self.waiting.pop_request()
             prompt_len = len(req.prompt_token_ids)
             num_cached = 0
+            n_prefix_blocks = 0
 
             if self.kv_cache_manager is not None:
                 cached_blocks, num_cached = (
                     self.kv_cache_manager.get_computed_blocks(req)
                 )
                 req.num_computed_tokens = num_cached
+                n_prefix_blocks = len(cached_blocks)
 
                 blocks = self.kv_cache_manager.allocate_slots(
                     req, prompt_len
                 )
-                if blocks is None:
+                if not self._has_kv_budget(blocks):
                     self.waiting.prepend_request(req)
                     break
                 new_blocks[req.request_id] = list(blocks.block_ids)
@@ -119,6 +129,7 @@ class Scheduler(SchedulerInterface):
                 block_ids=new_blocks.get(req.request_id, []),
                 num_computed_tokens=num_cached,
             ))
+            num_common_prefix_blocks.append(n_prefix_blocks)
 
         cached_data = CachedRequestData(
             req_ids=[r.request_id for r in self.running],
@@ -143,7 +154,25 @@ class Scheduler(SchedulerInterface):
             num_scheduled_tokens={},
             total_num_scheduled_tokens=total_tokens,
             finished_req_ids=set(),
+            num_common_prefix_blocks=num_common_prefix_blocks,
         )
+
+    # --- C038 resource budget checks ---
+
+    def _has_gpu_budget(self) -> bool:
+        """GPU budget: max_num_seqs not exceeded."""
+        return len(self.running) < self.max_running
+
+    def _has_token_budget(self, remaining: int) -> bool:
+        """Token budget: at least one token slot available."""
+        return remaining > 0
+
+    @staticmethod
+    def _has_kv_budget(blocks) -> bool:
+        """KV budget: sufficient free blocks allocated."""
+        return blocks is not None
+
+    # --- request lifecycle ---
 
     def finish(self, request: Request):
         if request in self.running:

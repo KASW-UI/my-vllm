@@ -206,6 +206,7 @@ When implementing a new stage, follow this exact sequence:
 - Model loading chain: `Executor._init_executor() → Worker.init_device() → GPUModelRunner.load_model()` — matching vLLM's deep loading architecture (model is loaded inside the runner, not passed in from the entry point)
 - KV cache is physical-block-based (BlockPool + FreeKVCacheBlockQueue, doubly-linked, O(1) alloc)
 - Prefix caching uses BlockHashToBlockMap (hash→list[block]), free_blocks() with ref_cnt cascading release, GC 驱逐逻辑, PrefixCache with CoW: shared blocks copied on write (ref_cnt > 1 → copy → decrement → private block)
+- Scheduler: FCFS + chunked-prefill + prefix-cache aware + resource model (GPU budget, KV budget, token budget) + preemption
 - Chunked prefill splits long prompts by `token_budget` at the Scheduler level
 - PagedAttention ops are pure PyTorch (`reshape_and_cache_pytorch`, `gather_cached_kv_pytorch`)
 - Sampler is an `nn.Module` subclass with penalties → temperature → top-k → top-p → sampling
