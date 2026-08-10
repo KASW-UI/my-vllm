@@ -241,11 +241,11 @@ Python Requests → Scheduler → InputBatch → GPU-friendly representation →
 
 ```
 AttentionBackend (ABC)
-├── TorchAttentionBackend   # PyTorch SDPA 后端
-└── FlashAttentionBackend   # FlashAttention 后端（stub → 可运行）
+├── FlashAttentionBackend   # SDPA-based (operational since C110)
+└── [future] other backends
 
-AttentionMetadata             # 传给 backend 的元数据
-AttentionMetadataBuilder      # 从 batch 构建 metadata
+AttentionMetadata            # 传给 backend 的元数据
+AttentionMetadataBuilder     # 从 batch 构建 metadata
 ```
 
 **抽象边界**：
@@ -307,17 +307,48 @@ TP=1, PP=2 → 两 GPU 流水线并行
 
 这属于：Runtime 如何根据硬件资源自适应。
 
-### P1-2：真实 Model Layer 抽象
+### P1-2：真实 Model Layer 抽象 ★★★★★
 
-`nn.Linear` → `LinearBase` → `ColumnParallelLinear` / `RowParallelLinear` / `QKVParallelLinear`
+**文件**：`model_executor/layers/linear.py`
 
-这里是 Model → Parallelism → Communication 的交汇点。
+**目标**：`nn.Linear` → `LinearBase` → `ColumnParallelLinear` / `RowParallelLinear` / `QKVParallelLinear`
 
-### P1-3：OPT 模型实现
+这里是 **Model → Parallelism → Communication** 的交汇点。
 
-`from transformers import OPTForCausalLM` → 用 vLLM 的 layer 重新实现 OPT
+**必须掌握的 6 个概念**（详见本文 `## Model loading: checkpoint → GPU`）：
+1. `initialize_model()` / `load_weights()` 分离 — 控制 GPU 显存峰值，enable TP sharding
+2. Meta device — `torch.device("meta")` 先建结构，再加载权重
+3. Weight mapping / `weight_loader` — checkpoint weight names ≠ runtime parameter layout
+4. Parallel Linear — `ColumnParallelLinear` / `RowParallelLinear` / `QKVParallelLinear`：本地计算 + NCCL 通信 = 全局结果
+5. Quantization at load time — checkpoint 和 GPU Runtime representation 可能不同
+6. Memory lifecycle — 从 safetensors 到 GPU HBM 的内存分配时序
 
-否则会一直停留在"vLLM = HuggingFace + Scheduler"的错误理解上。
+### P1-3：OPT 模型实现 ★★★★★
+
+**文件**：`model_executor/models/opt.py`
+
+**目标**：`from transformers import OPTForCausalLM` → 用 vLLM 的 layer 重新实现 OPT
+
+当前 `AutoModelForCausalLM.from_pretrained()` + `model.to("cuda")` 绕过了整个 Runtime 边界——没有 vLLM-style layers、没有 TP-aware loading、没有 weight mapping。
+
+修复后应形成：
+
+```
+Checkpoint (safetensors)
+    ↓
+ModelLoader (BaseModelLoader → DefaultModelLoader)
+    ↓ initialize_model() on meta device
+    ↓ load_weights() via safetensors iterator + weight_mapping
+    ↓ TP-aware shard
+vLLM Model (OPTForCausalLM)
+    ├── OPTAttention (vLLM Attention backend, QKVParallelLinear)
+    ├── OPTDecoderLayer
+    └── VocabParallelEmbedding / ParallelLMHead / LogitsProcessor
+    ↓
+GPU-resident model
+```
+
+否则会一直停留在 "vLLM = HuggingFace + Scheduler" 的错误理解上。
 
 ### P1-4：Sampler 工程边界
 
@@ -335,23 +366,125 @@ Sampler → SamplerOutput → LogitsProcessor → ModelRunnerOutput
 
 ---
 
-## P1：可作为接口存在，但不实现
+## Implementation scope tiers
 
-以下功能作为抽象接口/NoOp 实现保留，保持架构完整性：
+**Rule**: if a feature alters GPU execution, KV Cache, batching, scheduler, communication, or model parallelism, it cannot remain NoOp/ABC. It must have at least one real end-to-end implementation path.
+
+### Must implement
 
 ```
-KV Connector        → KVConnectorBase_V1 + NoopConnector
-LoRA                → 接口 stub，不实现适配器管理
-Quantization        → 接口存在，默认 UnquantizedLinearMethod
-Spec Decode         → 接口 stub
-Structured Output   → 接口 stub
-Multimodal          → 接口 stub
-Mamba / SSM         → 不实现
-EP / EPLB           → 接口 stub（Expert Parallel 调度）
-CP / DCP            → 接口 stub（Context Parallelism）
+Speculative Decoding     → 改变执行/采样/RequestState，属于 Runtime 核心
+EP (Expert Parallelism)  → MoE + All-to-All + NCCL，属于 Distributed Inference
+CP (Context Parallelism) → 改变 Attention/Context 执行和通信
+KV Connector             → 至少一个真实 backend（local/remote KV transfer）
+Quantization             → 至少一种真实实现（如 FP8）
 ```
 
-原则：如果某个功能会改变核心架构，就算不实现，也要保留正确的抽象位置。
+### Architecture + limited implementation
+
+```
+LoRA                → 接口 + 一个真实路径，证明理解 Runtime 扩展
+Mamba / SSM         → 理解 Runtime impact，实现优先级低
+Multimodal          → 理解 encoder/input processing 边界，有限实现
+Structured Output   → logits → constraint → sampler 基本路径
+```
+
+### Excluded from core code (study separately)
+
+```
+K8s ecosystem        → 必须理解，但不进入 my_vllm/ 核心代码
+Ray ecosystem        → 必须理解 Distributed Runtime 角色，但不进入核心
+Autoscaling          → 必须理解 serving 层调度闭环，但不进入核心
+Encoder-Decoder      → 理解另一种 KV/执行模式，不实现
+Mamba / SSM / Hybrid → 理解非 Transformer state cache，不实现
+非 OPT 模型架构         → 通过架构覆盖 Dense/GQA/MoE，不追求模型数量
+非 CUDA 平台 backend   → 不实现
+```
+
+
+---
+
+## KV Cache dtype abstractions
+
+The task is not "calling different precision KV cache libraries" — it is understanding vLLM's implementation abstraction for different KV Cache dtypes at three levels:
+
+### FP16 / BF16 — must fully understand (baseline)
+
+K/V tensor → block layout → write KV cache → paged attention → read K/V. Must be able to explain and implement: physical layout, block table, logical→physical block mapping, K/V write path, how attention kernel reads by block, how different sequences share/access different blocks in a batch.
+
+### FP8 — must understand the implementation, not necessarily write the full kernel
+
+FP16/BF16 K,V → quantization → FP8 KV cache → attention read → dequantization/scale. Must understand: E4M3 vs E5M2 differences, why KV is suitable for low-precision storage, scale provenance (per-tensor / per-token / per-channel), when quantization happens on write, how scale is consumed on read, and GPU/backend FP8 support differences. Can call mature FP8 libraries, but must know what problem they solve internally.
+
+### Other dtypes — understand the abstraction, not every format
+
+The goal is establishing the abstraction chain:
+
+```
+KVCacheSpec → dtype → scale/quantization metadata → cache storage layout → attention backend
+```
+
+Individual CUDA kernels for each dtype are not required.
+
+---
+
+## Model architecture priorities
+
+The goal is NOT "support many HF models" — it is understanding **how architecture differences force the Runtime to change**. Priority by Runtime impact:
+
+| Category | Examples | Why |
+|---|---|---|
+| **Must master** | Dense Transformer, GQA/MQA, MoE | Baseline execution; GQA directly changes KV Cache shape/metadata/kernel; MoE introduces Router→Top-K→Dispatch→Expert→Combine and connects to All-to-All/NCCL/EP |
+| **Must understand Runtime impact** | Long Context (RoPE), Multimodal (encoder), Encoder-Decoder, Mamba/SSM | Changes attention/KV cache; introduces encoder/input processing; alternative execution/KV modes; non-Transformer state cache |
+| **Awareness** | Other architectures | Know why vLLM has abstractions, can read code, can judge which Runtime module is affected |
+
+The implementation approach: **model count increases should add config/thin adapter layers, not duplicate Runtime**. Reusable layers (Linear, QKVParallelLinear, MLP, Attention, FusedMoE) are shared across architectures:
+
+```
+Model → Model Architecture → Reusable Layers
+                                 ├── Linear / ColumnParallelLinear / RowParallelLinear
+                                 ├── QKVParallelLinear (GQA/MQA)
+                                 ├── Attention (backend-swappable)
+                                 └── FusedMoE (Router + Expert + EP)
+```
+
+---
+
+## Model loading: checkpoint → GPU
+
+Model loading is not about supporting many checkpoint formats (HF, GGUF, safetensors...) — it is the **Runtime → GPU Memory → Distributed Execution** interface. The goal is understanding how a checkpoint becomes a GPU-resident, TP-shardable, executable model.
+
+### Why vLLM does not use `from_pretrained()` + `.to("cuda")`
+
+```
+AutoModelForCausalLM.from_pretrained()   ← loads HF class, all weights monolithically
+model.to("cuda")                         ← moves everything to GPU at once
+```
+
+This bypasses: TP sharding, meta-device memory efficiency, weight-to-runtime-parameter mismatch, online quantization. The real chain is:
+
+```
+ModelConfig → architecture selection → initialize_model() on meta device
+    → load_weights() via safetensors iterator → weight_mapping → TP-aware shard
+    → post-load processing → GPU-resident model
+```
+
+### 6 concepts to master
+
+| Concept | Why |
+|---|---|
+| **init/load separation** | `initialize_model()` creates structure; `load_weights()` fills weights. Controls GPU memory peak, enables TP sharding, online quantization |
+| **Meta device** | `torch.device("meta")` creates parameter structure without GPU storage — critical for large-model loading memory management |
+| **Weight mapping / weight_loader** | Checkpoint weight names ≠ runtime parameter layout. TP fuses QKV in checkpoint → QKVParallelLinear in runtime. The `weight_loader` bridges this mismatch |
+| **Parallel Linear** | `ColumnParallelLinear` / `RowParallelLinear` / `QKVParallelLinear` / `VocabParallelEmbedding` — local computation + NCCL communication = global result. This connects Model Loading → TP → NCCL → Distributed Inference |
+| **Quantization at load time** | Checkpoint representation ≠ GPU Runtime representation. Weight loader may quantize during loading (`finalize_layerwise_processing`) |
+| **Memory lifecycle** | Checkpoint (disk/mmap) → model construction (meta) → GPU allocation → weight loading (TP shard) → GPU-resident weights. Must answer: when is what memory allocated? What does each GPU get under TP=4? |
+
+### Current gap
+
+`model_executor/model_loader.py` calls `AutoModelForCausalLM.from_pretrained()` + `model.to("cuda")`, returning HF `OPTForCausalLM` with `nn.Linear` and HF attention. `models/opt.py` is a `from transformers import OPTForCausalLM` placeholder.
+
+This bypasses the entire Runtime boundary — no vLLM-style layers, no TP-aware loading, no weight mapping. P1-2 (Model layers) and P1-3 (OPT model) are the high-priority P1 items that close this gap.
 
 ---
 
@@ -359,44 +492,23 @@ CP / DCP            → 接口 stub（Context Parallelism）
 
 以下文件不存在于真实 vLLM 目标版本，属于自创文件，应删除/重构：
 
-| 文件 | 原因 |
-|---|---|
-| `v1/attention/backends/torch_attn.py` | 真实 vLLM 无此文件；PyTorch SDPA backend 应放在正确位置 |
-| `v1/attention/ops/ring_attention.py` | 真实 vLLM 无此文件；DCP attention 内联于 FlashAttention backend |
-| `distributed/elastic_ep/dispatch.py` | 真实 vLLM 无此文件；EP dispatch 在 `GroupCoordinator` 内 |
-| `v1/metrics/collector.py` | 真实 vLLM 无此文件；metrics 在 `stats.py` + `loggers.py` |
-| `v1/config.py` | 真实 vLLM 无此文件；仅为 backward-compat shim |
-| `runtime/` 目录 | 真实 vLLM 无此目录；入口点应在 `entrypoints/` |
+| 文件 | 状态 | 原因 |
+|---|---|---|---|
+| `v1/attention/backends/torch_attn.py` | ✅ C110 已删除 | 真实 vLLM 无此文件；代码已合并入 flash_attn.py |
+| `v1/attention/ops/ring_attention.py` | ✅ C110 已删除 | 真实 vLLM 无此文件；DCP attention 内联于 FlashAttention backend |
+| `distributed/elastic_ep/dispatch.py` | ✅ C110 已删除 | 真实 vLLM 无此文件；EP dispatch 在 `GroupCoordinator` 内 |
+| `v1/metrics/collector.py` | ✅ C110 已删除 | 真实 vLLM 无此文件；metrics 在 `stats.py` + `loggers.py` |
+| `v1/config.py` | ✅ C110 已删除 | 真实 vLLM 无此文件；仅为 backward-compat shim |
+| `runtime/` 目录 | ⏳ 待迁移 | 真实 vLLM 无此目录；入口点应在 `entrypoints/` |
 
 ---
-
-## Scope exclusion（明确不实现）
-
-```
-LoRA（全功能）
-Multimodal（图像/音频/视频）
-Encoder-Decoder 模型
-Mamba / SSM / Hybrid
-Structured Output（全功能）
-Speculative Decoding（全功能）
-各种 Quantization（GPTQ, AWQ, FP8, INT4...）
-各种 Model Architecture（非 OPT）
-各种 Sampling Backend（非核心 sampling）
-各种 Platform Backend（ROCm, XPU, TPU...）
-硬件兼容性代码
-K8s 部署
-Ray（全功能，但保留 actor 接口 stub）
-Autoscaling
-```
-
----
-
+ 
 ## Implementation order
 
 ```
 Phase 1: 清理 + 骨架建立
-  1. 删除自创文件（torch_attn.py, ring_attention.py, dispatch.py, collector.py, v1/config.py）
-  2. 重构 file tree 使 runtime/ → entrypoints/ 路径对齐
+  1. [DONE C110] 删除自创文件（torch_attn.py, ring_attention.py, dispatch.py, collector.py, v1/config.py）
+  2. [NEXT] 重构 file tree 使 runtime/ → entrypoints/ 路径对齐
   3. P0-9: Executor / Worker / Runner 边界对齐
   4. P0-10: Distributed abstraction 打通（TP=1 可运行，TP=2 可配置）
 
@@ -419,9 +531,16 @@ Phase 4: 辅助系统
   16. P1-4: Sampler 边界
   17. P1-5: Metrics
 
-Phase 5: 分布式打通
+Phase 5: 分布式打通 + Must Implement
   18. NCCL 多卡执行验证
   19. TP=2 / PP=2 可运行
+  20. Speculative Decoding：至少一条完整执行路径（draft → verify → accept → KV update）
+  21. EP：FusedMoE + All-to-All + NCCL dispatch/combine（至少 2 GPU）
+
+Phase 6: Must Implement（续）
+  22. CP：至少一条 Context Parallelism 执行路径（partition → local attn → communication → combine）
+  23. KV Connector：至少一个真实 backend（local shared-memory 或 remote transfer）
+  24. Quantization：至少 FP8 量化路径（KV cache 或 weight quantization）
 ```
 
 每个 Phase 内的顺序可按依赖关系调整，但 Phase 之间的顺序不应跨越。
