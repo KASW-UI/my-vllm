@@ -134,6 +134,8 @@ The **Phase implementation spec** for each stage determines which vLLM APIs to e
 
 **Path mapping**: Educational project `my_vllm/v1/distributed/` → real vLLM `vllm/distributed/` (top-level). `my_vllm/v1/model_executor/` → `vllm/model_executor/` (top-level). Translate paths when reading real source.
 
+**Implementation alignment**: P0 阶段不止 API 命名——核心实现（方法体、调用链、事件通知模式、通信原语选择、引用计数语义、采样策略）也须参照真实 vLLM 源码逐模块对照，只做教育性的行数和复杂度削减，不改变架构语义。
+
 ## Before EVERY code modification:
 
 - Re-read `Principle/Commit-Standard.md`
