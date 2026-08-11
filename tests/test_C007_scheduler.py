@@ -62,7 +62,7 @@ def test_scheduler_has_work():
 def test_scheduler_full_e2e():
     """Full end-to-end: scheduler + state_manager work together."""
     import torch
-    from my_vllm.runtime.tokenizer import load_tokenizer
+    from my_vllm.entrypoints.llm import load_tokenizer
     from my_vllm.model_executor.model_loader import load_model
     from my_vllm.v1.engine.core import EngineCore as StateManager
     from my_vllm.v1.worker.gpu_worker import Worker

@@ -1,4 +1,6 @@
-from my_vllm.runtime.main import run
+from my_vllm.entrypoints.llm import LLM
 
 if __name__ == "__main__":
-    run(["Hello, my name is"])
+    llm = LLM(model="facebook/opt-125m")
+    result = llm.generate("Hello, my name is", max_new_tokens=50)
+    print(result)

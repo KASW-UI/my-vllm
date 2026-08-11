@@ -116,7 +116,7 @@ def test_scheduler_schedules_with_enough_blocks():
 def test_kv_cache_manager_e2e():
     """Full pipeline with paged blocks."""
     import torch
-    from my_vllm.runtime.tokenizer import load_tokenizer
+    from my_vllm.entrypoints.llm import load_tokenizer
     from my_vllm.model_executor.model_loader import load_model
     from my_vllm.v1.engine.core import EngineCore as StateManager
     from my_vllm.v1.worker.gpu_worker import Worker

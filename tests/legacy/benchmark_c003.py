@@ -3,7 +3,7 @@
 import time
 import torch
 
-from my_vllm.runtime.tokenizer import load_tokenizer
+from my_vllm.entrypoints.llm import load_tokenizer
 from my_vllm.model_executor.model_loader import load_model
 from my_vllm.generation.sampler import greedy_sample
 from my_vllm.cache.kv_cache import KVCache

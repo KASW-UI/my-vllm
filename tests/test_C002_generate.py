@@ -1,6 +1,6 @@
-from my_vllm.runtime.tokenizer import load_tokenizer
+from my_vllm.entrypoints.llm import load_tokenizer
 from my_vllm.model_executor.model_loader import load_model
-from my_vllm.runtime.model import LLM
+from my_vllm.entrypoints.llm import LLM
 from my_vllm.v1.request import Request, RequestStatus
 
 

@@ -68,8 +68,10 @@ class TestC031FileCompleteness:
         "my_vllm/model_executor/__init__.py",
         "my_vllm/model_executor/model_loader.py",
         "my_vllm/model_executor/models/opt.py",
-        "my_vllm/server/__init__.py",
-        "my_vllm/server/api_server.py",
+        "my_vllm/entrypoints/__init__.py",
+        "my_vllm/entrypoints/llm.py",
+        "my_vllm/entrypoints/openai/__init__.py",
+        "my_vllm/entrypoints/openai/api_server.py",
     ]
 
     def test_c031_files_exist(self):

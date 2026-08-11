@@ -1,10 +1,10 @@
 """Start the API server."""
 
-from my_vllm.runtime.tokenizer import load_tokenizer
+from my_vllm.entrypoints.llm import LLM, load_tokenizer
 from my_vllm.config.vllm import EngineConfig
 from my_vllm.v1.engine.llm_engine import LLMEngine
 from my_vllm.v1.executor.uniproc_executor import UniProcExecutor
-from my_vllm.server.api_server import run_server
+from my_vllm.entrypoints.openai.api_server import run_server
 
 
 def main():

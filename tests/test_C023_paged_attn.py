@@ -106,7 +106,7 @@ MODEL = "/home/kasw/文档/GitHub/cpu-vllm/opt-125m"
 
 
 def _get_input_ids(prompt_text):
-    from my_vllm.runtime.tokenizer import load_tokenizer
+    from my_vllm.entrypoints.llm import load_tokenizer
     tok = load_tokenizer(MODEL)
     result = tok.encode(prompt_text)
     return list(result) if not isinstance(result, list) else result
