@@ -5,10 +5,16 @@ Mirrors vLLM V1 v1/core/kv_cache_utils.py:118-357.
 C018: KVCacheBlock gains ref_cnt, block_hash, doubly-linked list
 pointers; FreeKVCacheBlockQueue replaces the old _free_ids list
 with O(1) LRU-aware allocation and eviction.
+
+C120: _gen_lora_extra_hash_keys — LoRA adapter name as extra hash key
+for KV cache block prefix matching, preventing cross-adapter cache sharing.
 """
 
 from dataclasses import dataclass
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
+
+if TYPE_CHECKING:
+    from my_vllm.v1.request import Request
 
 
 class KVCacheBlockCopy(NamedTuple):
@@ -176,3 +182,23 @@ class FreeKVCacheBlockQueue:
     @property
     def is_empty(self) -> bool:
         return self.num_free_blocks == 0
+
+
+# ---------------------------------------------------------------------------
+# Extra hash keys for KV cache block prefix matching
+# ---------------------------------------------------------------------------
+
+
+def _gen_lora_extra_hash_keys(request: "Request") -> list[str]:
+    """Generate extra keys related to LoRA for block hash computation.
+
+    Mirrors vllm/v1/core/kv_cache_utils.py:517-529.
+
+    Returns LoRA name of the request if it is a LoRA request, otherwise
+    returns an empty list. This ensures that requests with different
+    LoRA adapters do not share KV cache blocks even when their token
+    prefixes match.
+    """
+    if not request.lora_request:
+        return []
+    return [request.lora_request.lora_name]

@@ -60,12 +60,21 @@ class Scheduler(SchedulerInterface):
         self.max_running = sc.max_num_seqs
         self.kv_cache_manager = kv_cache_manager
         self.max_num_batched_tokens = sc.max_num_batched_tokens
+        self.lora_config = vllm_config.lora_config
+        self.multi_tenant_config = vllm_config.multi_tenant_config
+
+        if self.multi_tenant_config.enabled:
+            self._per_tenant_usage: dict[str, dict[str, int]] = {
+                t.tenant_id: {"gpu_slots": 0, "kv_blocks": 0}
+                for t in self.multi_tenant_config.tenants
+            }
 
     def add_request(self, request: Request):
         request.status = RequestStatus.WAITING
         self.waiting.add_request(request)
 
     def schedule(self) -> SchedulerOutput:
+        self._promote_remote_kv_requests()
         token_budget = self.max_num_batched_tokens
         new_req_datas: list[NewRequestData] = []
         new_blocks: dict[str, list[int]] = {}
@@ -104,7 +113,17 @@ class Scheduler(SchedulerInterface):
                 num_computed_tokens=req.num_computed_tokens - chunk,
             ))
 
+        # Record the LoRAs in scheduled running requests
+        scheduled_loras: set[int] = set()
+        if self.lora_config:
+            scheduled_loras = set(
+                req.lora_request.lora_int_id
+                for req in self.running
+                if req.lora_request and req.lora_request.lora_int_id > 0
+            )
+
         # Pull new requests from waiting queue
+        skipped_lora_reqs: list[Request] = []
         while self.waiting:
             if not self._has_gpu_budget():
                 if not self._try_preempt_for_gpu_budget(preempted_req_ids):
@@ -113,6 +132,32 @@ class Scheduler(SchedulerInterface):
                 break
 
             req = self.waiting.pop_request()
+
+            # Check that adding the request still respects max_loras
+            if (
+                self.lora_config
+                and req.lora_request
+                and (
+                    len(scheduled_loras) == self.lora_config.max_loras
+                    and req.lora_request.lora_int_id not in scheduled_loras
+                )
+            ):
+                skipped_lora_reqs.append(req)
+                continue
+
+            # C120: check per-tenant resource quotas
+            tenant_id = self._get_tenant_id(req)
+            if tenant_id is not None:
+                if not self._has_tenant_gpu_budget(tenant_id):
+                    if not self._try_inter_tenant_preempt(
+                        req, tenant_id, preempted_req_ids
+                    ):
+                        skipped_lora_reqs.append(req)
+                        continue
+                    if not self._has_tenant_gpu_budget(tenant_id):
+                        skipped_lora_reqs.append(req)
+                        continue
+
             prompt_len = len(req.prompt_token_ids)
             num_cached = 0
             n_prefix_blocks = 0
@@ -139,6 +184,14 @@ class Scheduler(SchedulerInterface):
                     if not self._has_kv_budget(blocks):
                         self.waiting.prepend_request(req)
                         break
+
+                # C120: check tenant KV budget after block allocation
+                if (
+                    tenant_id is not None
+                    and not self._has_tenant_kv_budget(tenant_id)
+                ):
+                    self.waiting.prepend_request(req)
+                    continue
                 new_blocks[req.request_id] = list(blocks.block_ids)
 
             # C030: chunk if remaining > token_budget
@@ -151,6 +204,10 @@ class Scheduler(SchedulerInterface):
             )
 
             req.status = RequestStatus.RUNNING
+
+            if self.lora_config and req.lora_request:
+                scheduled_loras.add(req.lora_request.lora_int_id)
+
             self.running.append(req)
 
             new_req_datas.append(NewRequestData(
@@ -160,6 +217,10 @@ class Scheduler(SchedulerInterface):
                 num_computed_tokens=num_cached,
             ))
             num_common_prefix_blocks.append(n_prefix_blocks)
+
+        # Requeue LoRA-rejected requests for the next scheduling step
+        for req in reversed(skipped_lora_reqs):
+            self.waiting.prepend_request(req)
 
         cached_data = CachedRequestData(
             req_ids=[r.request_id for r in self.running
@@ -253,6 +314,89 @@ class Scheduler(SchedulerInterface):
                 return True
         return False
 
+    # --- C120 multi-tenant budget checks ---
+
+    def _get_tenant_id(self, request: Request) -> str | None:
+        """Get the tenant ID for a request, if multi-tenant is enabled."""
+        if not self.multi_tenant_config.enabled:
+            return None
+        return getattr(request, "tenant_id", None)
+
+    def _count_tenant_gpu_slots(self, tenant_id: str) -> int:
+        return sum(
+            1 for r in self.running
+            if r.status != RequestStatus.PREEMPTED
+            and getattr(r, "tenant_id", None) == tenant_id
+        )
+
+    def _count_tenant_kv_blocks(self, tenant_id: str) -> int:
+        if self.kv_cache_manager is None:
+            return 0
+        total = 0
+        for rid, blocks in self.kv_cache_manager.request_blocks.items():
+            req = self._find_request(rid)
+            if req is not None and getattr(req, "tenant_id", None) == tenant_id:
+                total += len(blocks)
+        return total
+
+    def _has_tenant_gpu_budget(self, tenant_id: str) -> bool:
+        tenant = self.multi_tenant_config.get_tenant(tenant_id)
+        if tenant is None:
+            return True
+        used = self._count_tenant_gpu_slots(tenant_id)
+        if used < tenant.max_gpu_slots:
+            return True
+        if self.multi_tenant_config.allow_burst and self._has_gpu_budget():
+            return True
+        return False
+
+    def _has_tenant_kv_budget(self, tenant_id: str) -> bool:
+        tenant = self.multi_tenant_config.get_tenant(tenant_id)
+        if tenant is None or self.kv_cache_manager is None:
+            return True
+        used = self._count_tenant_kv_blocks(tenant_id)
+        if used < tenant.max_kv_cache_blocks:
+            return True
+        if self.multi_tenant_config.allow_burst:
+            return True
+        return False
+
+    def _try_inter_tenant_preempt(
+        self, request: Request, tenant_id: str, preempted_ids: set[str],
+    ) -> bool:
+        """Preempt requests from lower-priority tenants to make room."""
+        if not self.multi_tenant_config.preempt_lower_priority:
+            return False
+        if not self.running:
+            return False
+
+        tenant = self.multi_tenant_config.get_tenant(tenant_id)
+        if tenant is None:
+            return False
+
+        victims = [
+            r for r in self.running
+            if r.status == RequestStatus.RUNNING
+            and getattr(r, "tenant_id", None) != tenant_id
+        ]
+        # Sort by tenant priority (lowest first)
+        victims.sort(key=lambda r: self._get_tenant_priority(getattr(r, "tenant_id", None)))
+
+        for victim in victims:
+            victim_priority = self._get_tenant_priority(getattr(victim, "tenant_id", None))
+            if victim_priority >= tenant.priority:
+                continue
+            self._preempt_request(victim)
+            preempted_ids.add(victim.request_id)
+            return True
+        return False
+
+    def _get_tenant_priority(self, tenant_id: str | None) -> int:
+        if tenant_id is None:
+            return 0
+        tenant = self.multi_tenant_config.get_tenant(tenant_id)
+        return tenant.priority if tenant else 0
+
     # --- C038 resource budget checks ---
 
     def _has_gpu_budget(self) -> bool:
@@ -299,6 +443,37 @@ class Scheduler(SchedulerInterface):
                 self.finish(req)
                 finished.append(req)
         return finished
+
+    # --- P/D disaggregation ---
+
+    def _promote_remote_kv_requests(self) -> None:
+        """Move WAITING_FOR_REMOTE_KVS requests to WAITING for recompute.
+
+        Called at the start of each schedule() call. Requests whose KV
+        transfer failed (under recompute policy) retain their valid
+        num_computed_tokens and will be re-prefilled from that position.
+        Aligns with vLLM Scheduler._update_waiting_for_remote_kv.
+        """
+        promoted: list[Request] = []
+        for req in list(self.waiting):
+            if req.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
+                promoted.append(req)
+        for req in promoted:
+            self.waiting.remove_request(req)
+            req.status = RequestStatus.WAITING
+            self.waiting.add_request(req)
+
+    def reinsert_for_prefill(self, request: Request) -> None:
+        """Insert a request that needs recompute after KV transfer failure.
+
+        Called by the consumer EngineCore when a KV transfer fails under
+        the recompute policy. The request's num_computed_tokens is already
+        set to the valid prefix by the connector.
+        """
+        request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
+        self.waiting.add_request(request)
+
+    # --- output processing ---
 
     def update_from_output(
         self,

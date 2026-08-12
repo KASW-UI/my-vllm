@@ -175,6 +175,21 @@ class KVCacheManager:
         if bt:
             self.block_pool.free_blocks(bt)
 
+    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock] | None:
+        """Remove blocks from tracking without freeing them.
+
+        Used by defer_block_free: the caller takes ownership of the blocks
+        and decides when to release them back to the pool.
+        Aligns with vLLM KVCacheManager.pop_blocks_for_free.
+        """
+        blocks = self.request_blocks.pop(request_id, None)
+        return blocks
+
+    def release_deferred_blocks(self, blocks: list[KVCacheBlock]) -> None:
+        """Release previously deferred blocks back to the pool."""
+        if blocks:
+            self.block_pool.free_blocks(blocks)
+
     @property
     def num_free_blocks(self) -> int:
         return self.block_pool.num_free

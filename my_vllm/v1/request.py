@@ -7,6 +7,9 @@ from typing import TYPE_CHECKING
 from my_vllm.v1.engine import FinishReason
 from my_vllm.v1.utils import ConstantList
 
+if TYPE_CHECKING:
+    from my_vllm.lora.request import LoRARequest
+
 
 class RequestStatus(enum.IntEnum):
     """Status of a request — mirrors vLLM V1 v1/request.py:343."""
@@ -72,6 +75,7 @@ class Request:
         arrival_time: float | None = None,
         priority: int = 0,
         block_hasher: Callable[["Request"], list[bytes]] | None = None,
+        lora_request: "LoRARequest | None" = None,
     ) -> None:
         self.request_id = request_id
         self.prompt_token_ids: list[int] = prompt_token_ids or []
@@ -79,7 +83,8 @@ class Request:
 
         self.sampling_params = sampling_params
         self.pooling_params = None
-        self.lora_request = None
+        self.lora_request = lora_request
+        self.tenant_id: str | None = None
         self.arrival_time = (
             arrival_time if arrival_time is not None else time.time()
         )

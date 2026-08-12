@@ -1,36 +1,15 @@
-"""KVCacheSpec — architecture boundary between Attention and KVCacheManager.
+"""KVQuantMode — stub mirroring vllm/v1/kv_cache_interface.py:KVQuantMode."""
 
-Mirrors vLLM V1 v1/kv_cache_interface.py.
-
-C018: minimal definition establishing the interface contract.
-Full KV cache config resolution added in C022 (Attention Backend).
-"""
-
-from dataclasses import dataclass
+from enum import IntEnum
 
 
-@dataclass
-class KVCacheSpec:
-    """Specification for a single KV cache layer group.
+class KVQuantMode(IntEnum):
+    """KV cache quantization mode enum.
 
-    Mirrors vLLM V1 kv_cache_interface.py FullAttentionSpec.
-    C018 minimal: only the essential fields needed to configure
-    the BlockPool.
+    Mirrors vllm/v1/kv_cache_interface.py.
     """
-
-    block_size: int
-    num_kv_heads: int
-    head_size: int
-    dtype: str = "float16"
-
-    @property
-    def page_size_bytes(self) -> int:
-        """Total bytes per block for this spec (K + V)."""
-        element_size = 2  # float16/bfloat16 = 2 bytes
-        return (
-            2  # K + V
-            * self.num_kv_heads
-            * self.block_size
-            * self.head_size
-            * element_size
-        )
+    NONE = 0
+    FP8_TENSOR = 1
+    INT8_PER_TOKEN_HEAD = 2
+    FP8_PER_TOKEN_HEAD = 3
+    INT4_PER_TOKEN_HEAD = 4

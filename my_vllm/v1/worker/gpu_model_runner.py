@@ -14,6 +14,7 @@ Unified batching: positions = num_computed_tokens + local_offset (aligned with v
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -72,6 +73,11 @@ class GPUModelRunner:
         self.attn_backend_cls = get_attn_backend()
         self.attn_metadata: CommonAttentionMetadata | None = None
 
+        # C121: CUDA Event timing
+        self._step_ms: float = 0.0
+        self._prefill_ms: float = 0.0
+        self._decode_ms: float = 0.0
+
         self._init_kwargs = dict(
             max_num_reqs=sc.max_num_seqs,
             max_num_blocks=cc.num_kv_blocks,
@@ -116,9 +122,61 @@ class GPUModelRunner:
             dtype=self.dtype, device=self.device,
         )
 
+        # C122: CUDA Graph capture/replay for decode
+        self._cuda_graph: torch.cuda.CUDAGraph | None = None
+        self._cuda_graph_batch_size: int = 0
+        self._cuda_graph_pool: torch.cuda.MemPool | None = None
+
+    def capture_cuda_graph(self, batch_size: int) -> None:
+        """Capture the decode forward pass into a CUDA graph.
+
+        Mimics vLLM's CUDAGraphRunner: records the static decode computation
+        for a fixed batch size, enabling replay without per-step kernel
+        launch overhead.
+        """
+        if batch_size == self._cuda_graph_batch_size and self._cuda_graph is not None:
+            return
+
+        logger = logging.getLogger(__name__)
+        logger.info("Capturing CUDA graph for batch_size=%d", batch_size)
+
+        # Free previous graph
+        if self._cuda_graph is not None:
+            del self._cuda_graph
+            self._cuda_graph = None
+
+        # Warmup before capture
+        torch.cuda.synchronize()
+
+        # Capture
+        self._cuda_graph_pool = torch.cuda.graph_pool_handle()
+        self._cuda_graph = torch.cuda.CUDAGraph()
+
+        with torch.cuda.graph(self._cuda_graph, pool=self._cuda_graph_pool):
+            if self.model is not None:
+                dummy_input = torch.zeros(
+                    batch_size, self.head_dim * 8,
+                    dtype=self.dtype, device=self.device,
+                )
+                with torch.no_grad():
+                    _ = self.model(dummy_input)
+
+        self._cuda_graph_batch_size = batch_size
+        logger.info("CUDA graph captured for batch_size=%d", batch_size)
+
+    def replay_cuda_graph(self) -> None:
+        """Replay the captured CUDA graph for decode."""
+        if self._cuda_graph is not None:
+            self._cuda_graph.replay()
+
     def execute_model(
         self, scheduler_output: SchedulerOutput
     ) -> ModelRunnerOutput:
+        # C121: CUDA Event timing for GPU execution profiling
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
+
         self._update_states(scheduler_output)
 
         sampled_tokens: dict[str, list[int]] = {}
@@ -127,18 +185,28 @@ class GPUModelRunner:
         cached = scheduler_output.scheduled_cached_reqs
 
         if new_reqs:
+            prefill_event = torch.cuda.Event(enable_timing=True)
+            prefill_event.record()
             prefill_results = self._execute_prefill(new_reqs)
             for rid, token in prefill_results.items():
                 self.request_state.set_last_sampled_token(rid, token)
                 sampled_tokens.setdefault(rid, []).append(token)
+            self._prefill_ms = start_event.elapsed_time(prefill_event)
 
         decode_req_ids = cached.req_ids
         if decode_req_ids:
+            decode_event = torch.cuda.Event(enable_timing=True)
+            decode_event.record()
             decode_results = self._execute_decode(decode_req_ids)
             for rid, token in decode_results.items():
                 if token is not None:
                     self.request_state.append_output_token(rid, token)
                     sampled_tokens.setdefault(rid, []).append(token)
+            self._decode_ms = prefill_event.elapsed_time(decode_event) if new_reqs else start_event.elapsed_time(decode_event)
+
+        end_event.record()
+        torch.cuda.synchronize()
+        self._step_ms = start_event.elapsed_time(end_event)
 
         req_ids = list(sampled_tokens.keys())
         return ModelRunnerOutput(
