@@ -23,9 +23,9 @@ Every file in `my_vllm/` must correspond to a real file in `vllm/`. No invented 
 
 **Previous history**: Stages C000→C098 were implemented under a prior "educational simulation" model. That history is preserved (never squash/rebase). The project now enters a new phase of **engineering alignment** (C110+) — see `Engineer-Spec/README.md` for the full specification.
 
-**Current status**: C127. `AsyncLLM` rewritten to drive `engine.step()` via `asyncio.to_thread` against an `LLMEngine(busy_loop=True)`; `examples/server.py` constructs the engine with `busy_loop=True`; naive `run_loop` / `_drain_queue` / `_add_to_engine` and the `asyncio.Queue[AsyncRequest]` are gone.
+**Current status**: C128. LOOP-PLAN §5 done criteria all checked off: `EngineCore.run_busy_loop()` + `input_queue`/`output_queue`/`shutdown_state` live; `LLMEngine` holds an `EngineCoreClient` (no direct `EngineCore(`); `AsyncLLM` no longer has naive loop / `asyncio.Queue`; offline (Inproc) and server/async (BusyLoop) produce byte-identical output. See `docs/snapshots/C128.md` for the closure write-up.
 
-**Next**: C128 — verification + docs (`git grep run_busy_loop` hits `core.py`; `git grep "EngineCore("` no longer hits `llm_engine.py`); LOOP-PLAN §5 done criteria checked off.
+**Next**: post-loop scope — distributed ZMQ / multiproc / DP / LoRA / quantization, per `Engineer-Spec` P0/P1 list.
 
 ## Commands
 

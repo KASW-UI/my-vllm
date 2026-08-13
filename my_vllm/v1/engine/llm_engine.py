@@ -70,14 +70,27 @@ class LLMEngine:
         return req.request_id
 
     def step(self) -> list[dict]:
-        """Run one scheduling + execution step and return finished outputs."""
+        """Run one scheduling + execution step and return finished outputs.
+
+        C128: when the client is a BusyLoopClient the busy loop
+        produces outputs in a background thread and ``get_output()``
+        blocks on its ``output_queue``. If the queue is empty *and*
+        the engine has no work, return an empty list instead of
+        blocking — the busy loop has already drained the scheduler.
+
+        C128 also uses ``self._pending`` (frontend-side Request map
+        populated in ``add_request``) as the ``req_map`` source.
+        Reading ``engine_core.running_requests()`` is racy under
+        ``BusyLoopClient`` because the busy-loop thread mutates the
+        scheduler concurrently.
+        """
         results: list[dict] = []
+        queue = getattr(self.engine_core, "output_queue", None)
+        if queue is not None and queue.empty() and not self.engine_core.has_work():
+            return []
         engine_core_outputs = self.engine_core.get_output()
 
-        req_map = {
-            r.request_id: r
-            for r in self.engine_core.running_requests()
-        }
+        req_map = dict(self._pending)
 
         outputs = self._output_processor.process_outputs(
             engine_core_outputs, req_map,
@@ -120,16 +133,32 @@ class LLMEngine:
         has_work() drains. Each step may produce zero or more outputs for the
         request; we accumulate the latest output_text and return once
         finish_reason is set.
+
+        C128: ``step()`` short-circuits when the busy loop has drained
+        the scheduler *and* the output_queue is empty, so the loop is
+        guaranteed to read the finished output sitting at the tail of
+        the queue before bailing out.
         """
         req_id = self.add_request(prompt, max_new_tokens=max_new_tokens)
         last_result: dict | None = None
-        while self.has_work():
+        max_iterations = (max_new_tokens + 1) * 2
+        for _ in range(max_iterations):
             results = self.step()
             for r in results:
                 if r["request_id"] == req_id:
                     last_result = r
                     if r.get("finish_reason"):
                         return r
+            if not self.has_work():
+                # One more step to flush any pending output_queue
+                # entries (BusyLoopClient) before giving up.
+                tail = self.step()
+                for r in tail:
+                    if r["request_id"] == req_id:
+                        last_result = r
+                        if r.get("finish_reason"):
+                            return r
+                break
         if last_result is not None:
             return last_result
         return {"request_id": req_id, "text": "", "finish_reason": "UNKNOWN"}
