@@ -1,8 +1,11 @@
 """Attention backend interface — mirrors vLLM V1 v1/attention/backend.py.
 
 C022: abstract interfaces (AttentionBackend, AttentionImpl) for
-pluggable attention computation.  FlashAttentionBackend
-default fallback using HF's native attention via model.forward().
+pluggable attention computation.
+
+C117 / C120: the default backend is now TritonAttentionBackend (real
+vLLM Triton kernels). FlashAttentionBackend is kept as a fallback for
+environments without Triton.
 """
 
 from abc import ABC, abstractmethod
