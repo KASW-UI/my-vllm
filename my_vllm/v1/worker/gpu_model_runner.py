@@ -125,6 +125,8 @@ class GPUModelRunner:
         self.block_tables: BlockTables | None = None
         self.kv_cache_k: torch.Tensor | None = None
         self.kv_cache_v: torch.Tensor | None = None
+        # HND-packed KV cache (5D) — see load_model() for layout.
+        self.kv_cache: torch.Tensor | None = None
         self.attn_metadata: CommonAttentionMetadata | None = None
 
         self._max_num_reqs = sc.max_num_seqs
@@ -159,14 +161,16 @@ class GPUModelRunner:
             device=self.device,
         )
 
-        self.kv_cache_k = torch.zeros(
+        self.kv_cache_k = None
+        self.kv_cache_v = None
+        # HND-packed layout: (num_layers, num_blocks, num_kv_heads,
+        #                     block_size, 2 * head_dim). K = [..., :head_dim],
+        # V = [..., head_dim:]. Matches vllm TritonAttentionBackend.
+        # get_kv_cache_shape and is what TritonAttentionImpl expects via
+        # bind_kv_cache (single 5D tensor per layer).
+        self.kv_cache = torch.zeros(
             self.num_layers, self.max_num_blocks, self.num_kv_heads,
-            self.block_size, self.head_dim,
-            dtype=self.dtype, device=self.device,
-        )
-        self.kv_cache_v = torch.zeros(
-            self.num_layers, self.max_num_blocks, self.num_kv_heads,
-            self.block_size, self.head_dim,
+            self.block_size, 2 * self.head_dim,
             dtype=self.dtype, device=self.device,
         )
 
@@ -174,9 +178,7 @@ class GPUModelRunner:
 
     def _bind_kv_caches(self) -> None:
         for i, layer in enumerate(self.model.model.decoder.layers):
-            k = self.kv_cache_k[i]
-            v = self.kv_cache_v[i]
-            layer.self_attn.attn.bind_kv_cache((k, v))
+            layer.self_attn.attn.bind_kv_cache(self.kv_cache[i])
 
     # ── execute_model: the V1 hot path ──────────────────────────────────
 

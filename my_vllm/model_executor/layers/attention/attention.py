@@ -162,12 +162,12 @@ class Attention(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> "type[object]":
         """Return the AttentionBackend class for this layer.
 
-        Mirrors vLLM Attention.get_attn_backend(). Default is
-        FlashAttentionBackend (SDPA-based); can be overridden by
-        subclasses or by the selector hook in v1/attention/selector.py.
+        Mirrors vLLM Attention.get_attn_backend(). Resolves via the
+        v1/attention/selector.get_attn_backend() hook so the backend is
+        configurable in one place.
         """
-        from my_vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-        return FlashAttentionBackend
+        from my_vllm.v1.attention.selector import get_attn_backend
+        return get_attn_backend()
 
     def get_kv_cache_spec(self, vllm_config):
         """Return the FullAttentionSpec for this layer.

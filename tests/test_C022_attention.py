@@ -8,6 +8,9 @@ from my_vllm.v1.attention.selector import get_attn_backend
 from my_vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend, FlashAttentionImpl,
 )
+from my_vllm.v1.attention.backends.triton_attn import (
+    TritonAttentionBackend, TritonAttentionImpl,
+)
 
 
 class TestAttentionBackendABC:
@@ -174,6 +177,10 @@ class TestCommonAttentionMetadata:
 
 class TestSelector:
     def test_get_attn_backend(self):
+        # C117: default backend is now TritonAttentionBackend
+        # (real vLLM Triton kernels). FlashAttentionBackend remains as a
+        # fallback only.
         backend = get_attn_backend()
-        assert backend is FlashAttentionBackend
-        assert backend.get_name() == "FLASH_ATTN"
+        assert backend is TritonAttentionBackend
+        assert backend.get_name() == "TRITON_ATTN"
+        assert backend.get_impl_cls() is TritonAttentionImpl
