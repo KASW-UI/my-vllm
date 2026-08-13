@@ -1,19 +1,31 @@
-"""KVCacheManager — KV cache lifecycle manager with allocate_slots interface.
+"""KVCacheManager — KV cache lifecycle manager (scheduler-facing facade).
 
 Mirrors vLLM V1 v1/core/kv_cache_manager.py.
 
-C018: allocate_slots() replaces allocate().  Manages per-request block
-tables and provides block ID lookups.  No longer creates KVCache objects
+C018: allocate_slots() replaces allocate(). Manages per-request block
+tables and provides block ID lookups. No longer creates KVCache objects
 (HF past_key_values) — the GPUModelRunner handles actual KV storage.
 
 C036: CoW protection on shared blocks — clones shared blocks (ref_cnt>1)
 and records KVCacheBlockCopy for the Worker to execute.
+
+C134: re-exposes the same per-request block-ID list as before
+(`get_block_ids` returns a flat list of ints for the single-group
+case) but delegates to the new `UnitaryKVCacheCoordinator` →
+`FullAttentionManager` hierarchy:
+    KVCacheManager (this file, scheduler-facing facade)
+        → UnitaryKVCacheCoordinator (kv_cache_coordinator.py)
+        → FullAttentionManager (single_type_kv_cache_manager.py)
+        → BlockPool (block_pool.py)
 """
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from my_vllm.v1.core.block_pool import BlockPool
+from my_vllm.v1.core.kv_cache_coordinator import (
+    UnitaryKVCacheCoordinator,
+)
 from my_vllm.v1.core.kv_cache_utils import KVCacheBlock, KVCacheBlockCopy
 from my_vllm.v1.request import Request
 
@@ -26,7 +38,8 @@ class KVCacheBlocks:
     """Allocation result bridging Scheduler ↔ KVCacheManager.
 
     Mirrors vLLM V1 kv_cache_manager.py:33.
-    Hides internal block representation from the Scheduler.
+    Flat list of block IDs (single-group case). Hides internal block
+    representation from the Scheduler.
     """
 
     block_ids: list[int]
@@ -40,10 +53,15 @@ class KVCacheBlocks:
 
 
 class KVCacheManager:
-    """KV cache lifecycle manager with allocate_slots interface.
+    """KV cache lifecycle manager — scheduler-facing facade.
 
     C018: tracks per-request block ownership via request_blocks dict.
     C036: CoW for shared blocks — allocates new block, records copy.
+
+    C134: delegates to UnitaryKVCacheCoordinator. The public API
+    (allocate_slots, get_computed_blocks, free, get_block_ids) is
+    preserved unchanged so existing callers (scheduler, EngineCore,
+    output processor) need no modification.
     """
 
     def __init__(
@@ -54,33 +72,34 @@ class KVCacheManager:
     ):
         self.block_pool = block_pool or BlockPool(num_blocks, block_size)
         self.block_size = self.block_pool.block_size
+        self.coordinator = UnitaryKVCacheCoordinator(
+            block_pool=self.block_pool,
+            block_size=self.block_size,
+            enable_caching=self.block_pool.enable_caching,
+        )
+        # Legacy per-request bookkeeping. Maintained for callers that
+        # still read `request_blocks` directly.
         self.request_blocks: dict[str, list[KVCacheBlock]] = {}
         self._pending_cow_copies: list[KVCacheBlockCopy] = []
+
+    # ── Public API (legacy-compatible) ─────────────────────────────────
 
     def allocate_slots(
         self, request: Request, num_new_tokens: int
     ) -> KVCacheBlocks | None:
-        """Allocate blocks for num_new_tokens. Returns block IDs or None."""
-        total_blocks_needed = max(
-            1, (num_new_tokens + self.block_size - 1) // self.block_size
+        """Allocate blocks for num_new_tokens. Returns flat block IDs or None."""
+        group_blocks = self.coordinator.allocate_new_blocks(
+            request, num_new_tokens
         )
-
-        existing = self.request_blocks.get(request.request_id, [])
-        current_blocks = len(existing)
-        new_blocks_needed = max(0, total_blocks_needed - current_blocks)
-
-        new_blocks: list[KVCacheBlock] = []
-        if new_blocks_needed > 0:
-            new_blocks = self.block_pool.get_new_blocks(new_blocks_needed)
-            if new_blocks is None:
-                return None
-
-        all_blocks = existing + new_blocks
-        self.request_blocks[request.request_id] = all_blocks
-
-        return KVCacheBlocks(
-            block_ids=[b.block_id for b in all_blocks]
-        )
+        if group_blocks is None:
+            return None
+        # Mirror allocation into the legacy dict so callers reading
+        # `request_blocks` see the same data.
+        flat_ids = group_blocks.block_ids
+        self.request_blocks[request.request_id] = [
+            self.block_pool.blocks[i] for i in flat_ids
+        ]
+        return KVCacheBlocks(block_ids=list(flat_ids))
 
     def get_computed_blocks(
         self, request: Request
@@ -90,124 +109,68 @@ class KVCacheManager:
         C029: walks request.block_hashes from the start. C036: CoW —
         bumps ref_cnt on reuse, clones shared blocks (ref_cnt>1) to
         prevent cross-request KV cache pollution, and records KVCacheBlockCopy.
-
-        Aligned with vLLM: stops at max_cache_hit_length = num_tokens - 1
-        (reserves last token for fresh logit computation).
         """
         if not self.block_pool.enable_caching:
             return KVCacheBlocks.empty(), 0
 
-        block_size = self.block_pool.block_size
-        max_cache_hit_length = max(0, request.num_tokens - 1)
-        request.compute_block_hashes(block_size)
-        cached_blocks, num_computed = self._walk_cached_prefix(
-            request, max_cache_hit_length, block_size,
-        )
-
-        if cached_blocks:
-            self.request_blocks[request.request_id] = cached_blocks
-            return KVCacheBlocks(
-                block_ids=[b.block_id for b in cached_blocks]
-            ), num_computed
-
+        cached_blocks, num_computed = self.coordinator.get_computed_blocks(request)
+        if cached_blocks.block_ids:
+            flat_ids = cached_blocks.block_ids
+            self.request_blocks[request.request_id] = [
+                self.block_pool.blocks[i] for i in flat_ids
+            ]
+            return KVCacheBlocks(block_ids=list(flat_ids)), num_computed
         return KVCacheBlocks.empty(), 0
-
-    def _walk_cached_prefix(
-        self,
-        request: Request,
-        max_cache_hit_length: int,
-        block_size: int,
-    ) -> tuple[list[KVCacheBlock], int]:
-        """Walk request.block_hashes, returning cached (and CoW'd) blocks.
-
-        Stops at the first miss or at max_cache_hit_length (reserving the
-        last token for fresh logit computation).
-        """
-        cached_blocks: list[KVCacheBlock] = []
-        num_computed = 0
-        for block_hash in request.block_hashes:
-            if not block_hash:
-                break
-            if num_computed >= max_cache_hit_length:
-                break
-            cached = self.block_pool.get_cached_block(block_hash)
-            if cached is None:
-                break
-            cached.ref_cnt += 1
-            private = self._apply_cow(cached)
-            cached_blocks.append(private)
-            num_computed += min(
-                block_size,
-                request.num_tokens - num_computed,
-            )
-        return cached_blocks, num_computed
-
-    def _apply_cow(self, block: KVCacheBlock) -> KVCacheBlock:
-        """Copy-on-write: clone shared block so writes don't pollute.
-
-        Aligned with vLLM SingleTypeKVCacheManager._apply_cow pattern.
-        """
-        if block.ref_cnt <= 1:
-            return block
-        new_blocks = self.block_pool.get_new_blocks(1)
-        if new_blocks is None:
-            return block
-        cow_block = new_blocks[0]
-        self._pending_cow_copies.append(
-            KVCacheBlockCopy(
-                src_block_id=block.block_id,
-                dst_block_id=cow_block.block_id,
-            )
-        )
-        block.ref_cnt -= 1
-        return cow_block
 
     def take_kv_cache_block_copies(
         self,
     ) -> tuple[list[KVCacheBlockCopy], list[KVCacheBlock]]:
         """Drain pending CoW copies for the Worker to execute.
 
-        Aligned with vLLM KVCacheManager.take_kv_cache_block_copies.
         Returns copies and the list of blocks to retain.
         """
-        copies = self._pending_cow_copies
-        self._pending_cow_copies = []
-        retained = []
-        for c in copies:
-            retained.append(self.block_pool.blocks[c.src_block_id])
-            retained.append(self.block_pool.blocks[c.dst_block_id])
-        return copies, retained
+        return self.coordinator.take_kv_cache_block_copies()
 
     def get_block_ids(self, request_id: str) -> list[int]:
-        bt = self.request_blocks.get(request_id, [])
-        return [b.block_id for b in bt]
+        # Flat: single group, so collapse the 2-level structure.
+        return self.coordinator.get_block_ids(request_id)[0]
 
     def get_blocks(self, request_id: str) -> list[KVCacheBlock]:
         return self.request_blocks.get(request_id, [])
 
     def free(self, request_id: str):
-        bt = self.request_blocks.pop(request_id, None)
-        if bt:
-            self.block_pool.free_blocks(bt)
+        self.request_blocks.pop(request_id, None)
+        self.coordinator.free(request_id)
 
     def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock] | None:
         """Remove blocks from tracking without freeing them.
 
         Used by defer_block_free: the caller takes ownership of the blocks
         and decides when to release them back to the pool.
-        Aligns with vLLM KVCacheManager.pop_blocks_for_free.
         """
-        blocks = self.request_blocks.pop(request_id, None)
-        return blocks
+        self.request_blocks.pop(request_id, None)
+        return self.coordinator.pop_blocks_for_free(request_id)
 
     def release_deferred_blocks(self, blocks: list[KVCacheBlock]) -> None:
         """Release previously deferred blocks back to the pool."""
         if blocks:
-            self.block_pool.free_blocks(blocks)
+            self.coordinator.release_deferred_blocks(blocks)
 
     @property
     def num_free_blocks(self) -> int:
-        return self.block_pool.num_free
+        return self.coordinator.num_free_blocks
+
+    # ── C036 legacy proxy (CoW unit tests) ─────────────────────────────
+
+    def _apply_cow(self, block: KVCacheBlock) -> KVCacheBlock:
+        """Apply Copy-on-Write on a single block.
+
+        Proxy to the underlying `FullAttentionManager._apply_cow`. Kept
+        for legacy C036 unit tests that exercise the CoW path directly
+        on the manager; new code should call `get_computed_blocks` which
+        invokes CoW automatically.
+        """
+        return self.coordinator.manager._apply_cow(block)
 
     # --- backward-compat methods (C014 tests) ---
 
@@ -217,4 +180,6 @@ class KVCacheManager:
 
     def get_cache(self, request_id: str):
         blocks = self.request_blocks.get(request_id)
-        return blocks if blocks else None
+        if blocks:
+            return [b.block_id for b in blocks]
+        return None
