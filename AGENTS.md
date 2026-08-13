@@ -23,9 +23,9 @@ Every file in `my_vllm/` must correspond to a real file in `vllm/`. No invented 
 
 **Previous history**: Stages C000→C098 were implemented under a prior "educational simulation" model. That history is preserved (never squash/rebase). The project now enters a new phase of **engineering alignment** (C110+) — see `Engineer-Spec/README.md` for the full specification.
 
-**Current status**: C124. EngineCore has the vLLM V1 busy-loop primitives (`run_busy_loop` + input/output queues + `EngineShutdownState` + `EngineCoreRequestType` {ADD/ABORT/WAKEUP}). The loop is *formable*; `LLMEngine.generate()` is still caller-driven (`while has_work(): step()`) — `EngineCoreClient` (InprocClient / BusyLoopClient) wiring lands at C125 per `LOOP-PLAN.md`.
+**Current status**: C125. `EngineCoreClient` abstraction in place (`InprocClient` for caller-driven offline, `BusyLoopClient` daemon thread for server/async); `LLMEngine` still holds `EngineCore` directly and is rewired at C126 per `LOOP-PLAN.md`.
 
-**Next**: C125 — `EngineCoreClient` abstraction (`InprocClient` / `BusyLoopClient`); C126 wires `LLMEngine` to the client; C127 rewires `AsyncLLM` + `api_server`; C128 closes the loop with verification + docs.
+**Next**: C126 — refactor `LLMEngine` to hold `EngineCoreClient` (pure refactor, behavior unchanged); C127 rewires `AsyncLLM` + `api_server` to `BusyLoopClient`; C128 closes the loop with verification + docs.
 
 ## Commands
 
@@ -60,7 +60,8 @@ my_vllm/
   distributed/         # → vllm/distributed/  parallel_state.py (GroupCoordinator), elastic_ep/
   model_executor/      # → vllm/model_executor/  model_loader, layers/linear, layers/fused_moe, models/opt
   v1/                  # → vllm/v1/
-    engine/            # EngineCore, LLMEngine, AsyncLLM, InputProcessor, OutputProcessor, detokenizer, exceptions
+    engine/            # EngineCore, EngineCoreClient (InprocClient / BusyLoopClient), LLMEngine,
+                      # AsyncLLM, InputProcessor, OutputProcessor, detokenizer, exceptions
     core/              # BlockPool, KVCacheManager, kv_cache_utils, kv_cache_metrics, kv_connector
       sched/           # Scheduler, SchedulerInterface, SchedulerOutput, request_queue
     worker/            # WorkerBase, Worker, GPUModelRunner
