@@ -28,11 +28,14 @@ Engineering details skipped (principled scope reduction):
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
+
+logger = logging.getLogger(__name__)
 
 from my_vllm.forward_context import set_forward_context
 from my_vllm.v1.attention.backend import CommonAttentionMetadata
@@ -42,6 +45,7 @@ from my_vllm.v1.sample.metadata import SamplingMetadata
 from my_vllm.v1.sample.sampler import Sampler
 from my_vllm.v1.worker.gpu.block_table import BlockTables
 from my_vllm.v1.worker.gpu.states import RequestState
+from my_vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 
 if TYPE_CHECKING:
     from my_vllm.config.vllm import VllmConfig
@@ -90,11 +94,18 @@ class InputBatch:
     slot_mapping: torch.Tensor
 
 
-class GPUModelRunner:
+class GPUModelRunner(LoRAModelRunnerMixin):
     """Mirrors vLLM V1 v1/worker/gpu/model_runner.py:GPUModelRunner (subset).
 
     Constructor: (vllm_config, device). Mirrors the Worker.init_device() contract
     (Worker constructs the runner and calls load_model()).
+
+    C148: now inherits `LoRAModelRunnerMixin` and wires LoRA activation
+    into `execute_model`. When `vllm_config.lora_config` is set,
+    `load_model()` calls `init_lora(...)` to wrap target Linear
+    layers with `*LoRA` wrappers; `execute_model()` then calls
+    `set_lora(id)` based on the per-step active adapter derived
+    from scheduled requests.
     """
 
     _EOS_TOKEN_ID = 2
@@ -104,6 +115,7 @@ class GPUModelRunner:
         cc = vllm_config.cache_config
         sc = vllm_config.scheduler_config
 
+        self.vllm_config = vllm_config
         self.model_name = mc.model_name
         self.dtype_str = mc.dtype
         self.block_size = cc.block_size
@@ -122,6 +134,12 @@ class GPUModelRunner:
         self._step_ms: float = 0.0
         self._prefill_ms: float = 0.0
         self._decode_ms: float = 0.0
+
+        # C148: LoRA active-adapter cache. Tracks the id last
+        # activated via `_set_active_lora` so we can skip
+        # `self.set_lora(id)` when the active adapter hasn't
+        # changed step-to-step (no-op fast path).
+        self._active_lora_int_id: int | None = None
 
         self.request_state: RequestState | None = None
         self.block_tables: BlockTables | None = None
@@ -184,6 +202,20 @@ class GPUModelRunner:
         )
 
         self._bind_kv_caches()
+
+        # C148: opt-in LoRA init. When `vllm_config.lora_config`
+        # is set, wrap target Linear layers with `*LoRA`
+        # wrappers. Default (lora_config=None) → no wrapping, no
+        # per-step overhead, all forward paths identical to
+        # pre-C148 behaviour.
+        if self.vllm_config.lora_config is not None:
+            lc = self.vllm_config.lora_config
+            self.init_lora(
+                model=self.model,
+                max_loras=lc.max_loras,
+                max_lora_rank=lc.max_lora_rank,
+                device=self.device,
+            )
 
         if not self.enforce_eager:
             self.capture_cudagraph()
@@ -311,8 +343,9 @@ class GPUModelRunner:
         """Run one scheduling + execution step. Mirrors vLLM execute_model().
 
         Pipeline:
-            update_states → prepare_inputs → prepare_attn →
-            set_forward_context → model.forward → sample → postprocess.
+            update_states → set_active_lora → prepare_inputs →
+            prepare_attn → set_forward_context → model.forward →
+            sample → postprocess.
 
         Decode-only steps (no new reqs, all bs <= max captured) replay
         a captured CUDA graph when enforce_eager is False.
@@ -327,6 +360,10 @@ class GPUModelRunner:
         start_event.record()
 
         self._update_states(scheduler_output)
+        # C148: pick the active LoRA adapter for this step and
+        # apply it before model forward (no-op when LoRA
+        # disabled or no request carries an adapter).
+        self._set_active_lora(scheduler_output)
 
         input_batch = self._prepare_inputs(scheduler_output)
 
@@ -403,6 +440,10 @@ class GPUModelRunner:
                 self.request_state.add_request(d.req_id, d.prompt_token_ids)
             idx = self.request_state.get_index(d.req_id)
             self.block_tables.append_block_ids(idx, d.block_ids)
+            # C148: remember the per-request LoRA adapter id so
+            # `_set_active_lora` can derive the active adapter
+            # for the step.
+            self.request_state.req_id_to_lora_id[d.req_id] = d.lora_int_id
 
         cached = scheduler_output.scheduled_cached_reqs
         for i, rid in enumerate(cached.req_ids):
@@ -411,6 +452,54 @@ class GPUModelRunner:
                 if new_bids is not None:
                     idx = self.request_state.get_index(rid)
                     self.block_tables.append_block_ids(idx, new_bids)
+
+    # ── LoRA active-adapter selection (C148) ───────────────────────────
+
+    def _set_active_lora(self, scheduler_output: SchedulerOutput) -> None:
+        """Pick the active LoRA adapter for this step and apply it.
+
+        Single-active-adapter path (subset of vLLM's SGMV
+        multiplexing): the first non-None `lora_int_id` across
+        the scheduled requests wins. The runner's
+        `self._active_lora_int_id` cache is consulted so
+        `self.set_lora(id)` is only called when the active
+        adapter actually changes step-to-step (fast path for
+        decode-heavy steady state).
+
+        Called once per `execute_model()` before the model
+        forward. When LoRA is disabled (no `init_lora` was
+        called) the method is a no-op.
+        """
+        if not hasattr(self, "lora_worker_manager"):
+            return  # LoRA disabled — nothing to do
+
+        active_id: int | None = None
+        for d in scheduler_output.scheduled_new_reqs:
+            if d.lora_int_id is not None:
+                active_id = d.lora_int_id
+                break
+        if active_id is None:
+            for rid in scheduler_output.scheduled_cached_reqs.req_ids:
+                lora_id = self.request_state.req_id_to_lora_id.get(rid)
+                if lora_id is not None:
+                    active_id = lora_id
+                    break
+
+        if active_id is None:
+            return
+        if active_id == self._active_lora_int_id:
+            return
+        try:
+            self.set_lora(active_id)
+            self._active_lora_int_id = active_id
+        except KeyError:
+            # Adapter not registered yet (e.g. scheduler races
+            # add_lora / schedule). Skip this step — the next
+            # step will retry once the adapter is registered.
+            logger.warning(
+                "LoRA: adapter %d not registered; skipping set_lora",
+                active_id,
+            )
 
     # ── prepare_inputs (mirrors vLLM prepare_inputs) ────────────────────
 

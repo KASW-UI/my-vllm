@@ -14,13 +14,17 @@ from my_vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 class NewRequestData:
     """Data for a request scheduled for the first time.
 
-    Mirrors vLLM V1 v1/core/sched/output.py:35.
+    Mirrors vLLM V1 v1/core/sched/output.py:35 (subset).
+    C148: added `lora_int_id` — populated by the scheduler from
+    `Request.lora_request.lora_int_id` so the runner can route
+    per-request LoRA activation.
     """
 
     req_id: str
     prompt_token_ids: list[int] = field(default_factory=list)
     block_ids: list[int] = field(default_factory=list)
     num_computed_tokens: int = 0
+    lora_int_id: int | None = None
 
 
 @dataclass

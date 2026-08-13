@@ -160,6 +160,10 @@ class Scheduler(SchedulerInterface):
                 prompt_token_ids=req.prompt_token_ids,
                 block_ids=new_blocks.get(req.request_id, []),
                 num_computed_tokens=req.num_computed_tokens - chunk,
+                lora_int_id=(
+                    req.lora_request.lora_int_id
+                    if req.lora_request is not None else None
+                ),
             ))
         return token_budget
 
@@ -233,6 +237,10 @@ class Scheduler(SchedulerInterface):
                 prompt_token_ids=req.prompt_token_ids,
                 block_ids=list(blocks.block_ids),
                 num_computed_tokens=num_cached,
+                lora_int_id=(
+                    req.lora_request.lora_int_id
+                    if req.lora_request is not None else None
+                ),
             ))
             num_common_prefix_blocks.append(n_prefix_blocks)
 

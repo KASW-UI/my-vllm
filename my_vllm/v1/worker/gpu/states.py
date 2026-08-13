@@ -26,6 +26,13 @@ class RequestState:
         self.index_to_req_id: dict[int, str] = {}
         self.free_indices = list(range(max_num_reqs))
 
+        # Per-request LoRA adapter id (C148). Set when the
+        # request is added in `_update_states` from
+        # `NewRequestData.lora_int_id`; cleared on
+        # `remove_request`. The runner uses this to decide which
+        # LoRA adapter to activate per step.
+        self.req_id_to_lora_id: dict[str, int | None] = {}
+
         # [max_num_reqs, max_model_len] int32 — all token IDs per request
         self.all_token_ids = torch.zeros(
             max_num_reqs, max_model_len,
@@ -100,6 +107,8 @@ class RequestState:
         self.all_token_ids[idx].zero_()
         self.num_computed_tokens_cpu[idx] = 0
         self.last_sampled_tokens[idx].zero_()
+        # C148: drop any LoRA mapping for this request.
+        self.req_id_to_lora_id.pop(req_id, None)
         return idx
 
     def get_index(self, req_id: str) -> int:
