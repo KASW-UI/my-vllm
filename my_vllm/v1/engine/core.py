@@ -1,3 +1,21 @@
+"""EngineCore — core execution loop. Mirrors vllm V1 v1/engine/core.py.
+
+The hot path (step) is a 12-line pipeline:
+
+    schedule → execute → update_from_output →
+    finish_completed → kv_transfer → collect_metrics
+
+C017: batch prefill via executor.execute_model().
+C025: output processing delegated to OutputProcessor.
+C048: metrics collection — SchedulerStats + IterationStats per step.
+C112: P/D disaggregation (NIXL), LoRA multiplexing, multi-tenant quotas,
+      CUDA Event profiling — all reachable as side-module helpers,
+      not inlined into step().
+C121: tighten step() body to a top-to-bottom pipeline. Every concern
+      beyond schedule/execute/update_from_output is delegated to a
+      helper; the main path reads top-to-bottom like nano-vllm.
+"""
+
 from __future__ import annotations
 
 import logging
@@ -7,13 +25,9 @@ from typing import TYPE_CHECKING
 import torch
 
 from my_vllm.v1.core.block_pool import BlockPool
-from my_vllm.v1.core.kv_cache_manager import KVCacheManager, KVCacheBlocks
+from my_vllm.v1.core.kv_cache_manager import KVCacheManager
 from my_vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from my_vllm.v1.core.kv_connector import (
-    RecvResult,
-    TransferBundle,
-    TransferStatus,
-)
+from my_vllm.v1.core.kv_connector import TransferBundle
 from my_vllm.v1.core.sched.scheduler import Scheduler
 from my_vllm.v1.engine import EngineCoreOutputs
 from my_vllm.v1.executor.abstract import Executor
@@ -37,9 +51,11 @@ logger = logging.getLogger(__name__)
 class EngineCore:
     """Core execution loop — mirrors vLLM V1 v1/engine/core.py:EngineCore.
 
-    C017: batch prefill via executor.execute_model().
-    C025: output processing delegated to OutputProcessor.
-    C048: metrics collection — SchedulerStats + IterationStats per step.
+    step() body is intentionally short: every per-step concern beyond the
+    core V1 loop (schedule → execute → update_from_output) lives in a
+    dedicated helper. The 12-line top-to-bottom shape matches nano-vllm's
+    LLMEngine.step() while still wiring C112 features (LoRA, multi-tenant,
+    NIXL P/D) via the side-module helpers.
     """
 
     def __init__(
@@ -90,6 +106,8 @@ class EngineCore:
             self.failure_policy = self.kv_transfer_config.kv_load_failure_policy
             self._kv_connector_init()
 
+    # ── Public API ──────────────────────────────────────────────────────
+
     def add_request(self, request: Request):
         self.scheduler.add_request(request)
         self._request_arrival[request.request_id] = request.arrival_time
@@ -97,59 +115,99 @@ class EngineCore:
     def has_work(self) -> bool:
         return self.scheduler.has_work()
 
-    def step(self):
+    def step(self) -> EngineCoreOutputs:
+        """One scheduling + execution step. Top-to-bottom pipeline."""
         self._step_count += 1
         step_start = time.time()
 
-        # C112: consumer-side KV receive (before schedule)
-        if self.kv_transfer_config is not None:
-            if self.kv_transfer_config.is_kv_consumer:
-                self._consumer_recv_loop()
+        # 1. P/D consumer recv (no-op unless kv_transfer_config + is_consumer).
+        self._maybe_consumer_recv()
 
+        # 2. Schedule: pick what to run this step.
         scheduler_output = self.scheduler.schedule()
         if scheduler_output.total_num_scheduled_tokens == 0:
             return EngineCoreOutputs()
 
+        # 3. Execute: model forward.
         model_output = self.executor.execute_model(scheduler_output)
         if model_output is None:
             return EngineCoreOutputs()
 
+        # 4. Update: scheduler advances req state from model output.
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output,
         )
 
-        step_end = time.time()
-
-        for eo in engine_core_outputs.outputs:
-            if eo.finish_reason is not None:
-                req = self._find_request(eo.request_id)
-                if req is not None and req not in self.finished:
-                    self._finish_request(req)
-
-        # C112: producer-side KV transfer (after finish)
-        if self.kv_transfer_config is not None:
-            if self.kv_transfer_config.is_kv_producer:
-                self._producer_transfer_loop(engine_core_outputs)
-
+        # 5. Side concerns (each no-ops if disabled).
+        self._finish_completed_requests(engine_core_outputs)
+        self._maybe_producer_transfer(engine_core_outputs)
         self._collect_metrics(
             scheduler_output, model_output,
-            engine_core_outputs, step_start, step_end,
+            engine_core_outputs, step_start, time.time(),
         )
 
         return engine_core_outputs
+
+    # ── Side concerns (each is a self-contained helper) ────────────────
+
+    def _finish_completed_requests(
+        self, engine_core_outputs: EngineCoreOutputs,
+    ) -> None:
+        """Free KV blocks + cleanup worker state for finished reqs.
+
+        Mirrors vLLM's request-finish handling inside step().
+        """
+        for eo in engine_core_outputs.outputs:
+            if eo.finish_reason is None:
+                continue
+            req = self._find_request(eo.request_id)
+            if req is None or req in self.finished:
+                continue
+            self._finish_request(req)
+
+    def _maybe_consumer_recv(self) -> None:
+        """P/D consumer: receive KV bundles from producer before schedule.
+
+        No-op unless kv_transfer_config is set and the engine is a consumer.
+        """
+        if self.kv_transfer_config is None:
+            return
+        if not self.kv_transfer_config.is_kv_consumer:
+            return
+        self._consumer_recv_loop()
+
+    def _maybe_producer_transfer(
+        self, engine_core_outputs: EngineCoreOutputs,
+    ) -> None:
+        """P/D producer: ship finished prefill blocks to consumer.
+
+        No-op unless kv_transfer_config is set and the engine is a producer.
+        """
+        if self.kv_transfer_config is None:
+            return
+        if not self.kv_transfer_config.is_kv_producer:
+            return
+        self._producer_transfer_loop(engine_core_outputs)
 
     def _collect_metrics(
         self,
         scheduler_output,
         model_output,
-        engine_core_outputs,
+        engine_core_outputs: EngineCoreOutputs,
         step_start: float,
         step_end: float,
     ) -> None:
+        """Build SchedulerStats + IterationStats for this step and log them.
+
+        Mirrors vLLM Stats.update_from_output + StatLogger.record. Captures
+        TTFT, TPOT, ITL, KV cache usage, prefix-cache hit events.
+        """
         eviction_events = self._kv_metrics_collector.drain_events()
 
-        kv_usage = 1.0 - (self.kv_cache_manager.num_free_blocks /
-                          self.kv_cache_manager.block_pool.num_blocks)
+        kv_usage = 1.0 - (
+            self.kv_cache_manager.num_free_blocks
+            / self.kv_cache_manager.block_pool.num_blocks
+        )
         cache_stats = PrefixCacheStats()
         sched_stats = SchedulerStats(
             num_running_reqs=len(self.scheduler.running),
@@ -175,27 +233,28 @@ class EngineCore:
 
         finished: list[FinishedRequestStats] = []
         for eo in engine_core_outputs.outputs:
-            if eo.finish_reason is not None:
-                rid = eo.request_id
-                req = self._find_request(rid)
-                if req is None:
-                    continue
-                n_prompt = len(req.prompt_token_ids)
-                n_gen = req.num_output_tokens
-                e2e = step_end - self._request_arrival.get(rid, step_end)
-                ttft = self._request_ttft.get(rid, 0.0)
-                tpot = (e2e - ttft) / n_gen if n_gen > 0 else 0.0
-                finished.append(FinishedRequestStats(
-                    request_id=rid,
-                    num_prompt_tokens=n_prompt,
-                    num_generation_tokens=n_gen,
-                    e2e_latency=e2e,
-                    ttft=ttft,
-                    tpot=tpot,
-                    itl=0.0,
-                ))
-                self._request_ttft.pop(rid, None)
-                self._request_arrival.pop(rid, None)
+            if eo.finish_reason is None:
+                continue
+            rid = eo.request_id
+            req = self._find_request(rid)
+            if req is None:
+                continue
+            n_prompt = len(req.prompt_token_ids)
+            n_gen = req.num_output_tokens
+            e2e = step_end - self._request_arrival.get(rid, step_end)
+            ttft = self._request_ttft.get(rid, 0.0)
+            tpot = (e2e - ttft) / n_gen if n_gen > 0 else 0.0
+            finished.append(FinishedRequestStats(
+                request_id=rid,
+                num_prompt_tokens=n_prompt,
+                num_generation_tokens=n_gen,
+                e2e_latency=e2e,
+                ttft=ttft,
+                tpot=tpot,
+                itl=0.0,
+            ))
+            self._request_ttft.pop(rid, None)
+            self._request_arrival.pop(rid, None)
 
         iter_stats.update_from_output(
             num_prompt_tokens=num_prompt_tokens,
@@ -207,6 +266,8 @@ class EngineCore:
         iter_stats.set_decode_time(step_end - step_start)
 
         self._stat_logger.record(sched_stats, iter_stats)
+
+    # ── helpers ─────────────────────────────────────────────────────────
 
     def _find_request(self, request_id: str) -> Request | None:
         for req in self.scheduler.running:
@@ -221,7 +282,7 @@ class EngineCore:
         self.scheduler.finish(req)
         self.finished.append(req)
 
-    # --- P/D disaggregation (C112) ---
+    # ── P/D disaggregation helpers (C112) ───────────────────────────────
 
     def _kv_connector_init(self) -> None:
         """Create KV connector for P/D transfer.
@@ -232,13 +293,13 @@ class EngineCore:
         from my_vllm.v1.core.kv_connector import NoopConnector
         self.kv_connector = NoopConnector()
 
-    def _producer_transfer_loop(self, outputs) -> None:
+    def _producer_transfer_loop(self, outputs: EngineCoreOutputs) -> None:
         """P side: transfer finished prefill requests to consumer.
 
         For each finished prefill request:
-        1. Extract KV blocks from BlockPool
-        2. Send to consumer via connector
-        3. Defer block free until ACK received (defer_block_free)
+        1. Extract KV blocks from BlockPool.
+        2. Send to consumer via connector.
+        3. Defer block free until ACK received.
 
         Also drains ACKs from consumer to release deferred blocks.
         Aligns with vLLM's deferred block free + KV connector send.
@@ -250,9 +311,7 @@ class EngineCore:
             if req is None:
                 continue
 
-            blocks = self.kv_cache_manager.pop_blocks_for_free(
-                req.request_id
-            )
+            blocks = self.kv_cache_manager.pop_blocks_for_free(req.request_id)
             if blocks is None:
                 continue
 
@@ -276,13 +335,13 @@ class EngineCore:
         """D side: receive KV from producer, insert into scheduler.
 
         For each received bundle:
-        1. Allocate blocks in local BlockPool
-        2. Register request in scheduler with all tokens already computed
-        3. Send ACK back to producer
+        1. Allocate blocks in local BlockPool.
+        2. Register request in scheduler with all tokens already computed.
+        3. Send ACK back to producer.
 
         For failed transfers:
-        - policy=="fail": mark request FINISHED_ERROR
-        - policy=="recompute": insert for prefill with truncated tokens
+        - policy=="fail": mark request FINISHED_ERROR.
+        - policy=="recompute": insert for prefill with truncated tokens.
 
         Aligns with vLLM Scheduler._update_from_kv_xfer_finished +
         _handle_invalid_blocks.
@@ -291,24 +350,20 @@ class EngineCore:
             return
 
         result = self.kv_connector.check_transfer_done(
-            timeout=self.transfer_timeout
+            timeout=self.transfer_timeout,
         )
 
         for bundle in result.bundles:
-            from my_vllm.v1.request import Request
-            from my_vllm.v1.request import SamplingParams
             req = Request(
                 request_id=bundle.request_id,
                 prompt_token_ids=[],
-                sampling_params=SamplingParams(),
+                sampling_params=None,
                 arrival_time=time.time(),
             )
             req.num_computed_tokens = bundle.num_tokens
             req.status = RequestStatus.RUNNING
 
-            self.kv_cache_manager.allocate_slots(
-                req, bundle.num_tokens
-            )
+            self.kv_cache_manager.allocate_slots(req, bundle.num_tokens)
             self.scheduler.running.append(req)
 
             if self.kv_connector is not None:
@@ -317,16 +372,14 @@ class EngineCore:
         for req_id in result.invalid_req_ids:
             if self.failure_policy == "fail":
                 self.scheduler.finish_requests(
-                    [req_id], RequestStatus.FINISHED_ERROR
+                    [req_id], RequestStatus.FINISHED_ERROR,
                 )
             else:
-                from my_vllm.v1.request import Request
-                from my_vllm.v1.request import SamplingParams
                 valid = result.valid_prefix_tokens.get(req_id, 0)
                 req = Request(
                     request_id=req_id,
                     prompt_token_ids=[],
-                    sampling_params=SamplingParams(),
+                    sampling_params=None,
                     arrival_time=time.time(),
                 )
                 req.num_computed_tokens = valid
@@ -352,20 +405,18 @@ class EngineCore:
 
         for req_id, expire in self._deferred_frees:
             if req_id in acks:
-                if acks[req_id]:
-                    self.kv_cache_manager.free(req_id)
-                else:
-                    self.kv_cache_manager.free(req_id)
+                # ACK (success or failure) → release blocks either way.
+                self.kv_cache_manager.free(req_id)
                 continue
 
             if now > expire:
                 if self.failure_policy == "recompute":
                     logger.warning(
-                        "KV transfer timeout for %s, recomputing", req_id
+                        "KV transfer timeout for %s, recomputing", req_id,
                     )
                 else:
                     logger.error(
-                        "KV transfer timeout for %s, failing", req_id
+                        "KV transfer timeout for %s, failing", req_id,
                     )
                 self.kv_cache_manager.free(req_id)
                 continue
