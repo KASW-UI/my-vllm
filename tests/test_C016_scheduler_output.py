@@ -38,21 +38,22 @@ class TestCachedRequestData:
         d = CachedRequestData.make_empty()
         assert d.req_ids == []
         assert d.num_reqs == 0
-        assert d.new_block_ids == {}
-        assert d.num_computed_tokens == {}
-        assert d.num_output_tokens == {}
+        assert d.new_block_ids == []
+        assert d.num_computed_tokens == []
+        assert d.num_output_tokens == []
 
     def test_full(self):
         d = CachedRequestData(
             req_ids=["r1", "r2"],
-            new_block_ids={"r1": [10]},
-            num_computed_tokens={"r1": 5, "r2": 3},
-            num_output_tokens={"r1": 2, "r2": 1},
+            new_block_ids=[[10], None],
+            num_computed_tokens=[5, 3],
+            num_output_tokens=[2, 1],
         )
         assert d.req_ids == ["r1", "r2"]
         assert d.num_reqs == 2
-        assert d.new_block_ids["r1"] == [10]
-        assert d.num_computed_tokens["r2"] == 3
+        assert d.new_block_ids[0] == [10]
+        assert d.new_block_ids[1] is None
+        assert d.num_computed_tokens[1] == 3
 
 
 class TestSchedulerOutput:
@@ -73,8 +74,8 @@ class TestSchedulerOutput:
         nd = NewRequestData(req_id="n1", prompt_token_ids=[1])
         cd = CachedRequestData(
             req_ids=["r1"],
-            num_computed_tokens={"r1": 0},
-            num_output_tokens={"r1": 0},
+            num_computed_tokens=[0],
+            num_output_tokens=[0],
         )
         o = SchedulerOutput(
             scheduled_new_reqs=[nd],

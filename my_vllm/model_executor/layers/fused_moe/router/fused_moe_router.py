@@ -1,26 +1,53 @@
-"""FusedMoERouter — TopK gating with load balancing. Aligns with vLLM FusedMoERouter."""
+"""FusedMoERouter ABC — aligns with vLLM."""
+
+from abc import ABC, abstractmethod
 
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
+
+from my_vllm.model_executor.layers.fused_moe.config import RoutingMethodType
 
 
-class FusedMoERouter(nn.Module):
-    """Top-K gating router for MoE.
+class FusedMoERouter(ABC):
+    """Abstract base class for MoE routers — aligns with vLLM FusedMoERouter."""
 
-    Computes router logits, selects top_k experts per token,
-    returns softmax-normalized routing weights and expert indices.
-    """
+    def __init__(self):
+        self._routing_replay_out: torch.Tensor | None = None
 
-    def __init__(self, hidden_dim: int, num_experts: int = 8, top_k: int = 2) -> None:
-        super().__init__()
-        self.gate = nn.Linear(hidden_dim, num_experts, bias=False)
-        self.top_k = top_k
+    @abstractmethod
+    def set_capture_fn(self, capture_fn) -> None:
+        raise NotImplementedError
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        router_logits = self.gate(x)
-        routing_weights, expert_indices = torch.topk(
-            router_logits, self.top_k, dim=-1
+    @property
+    @abstractmethod
+    def routing_method_type(self) -> RoutingMethodType:
+        raise NotImplementedError
+
+    @abstractmethod
+    def _select_experts(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        topk_indices_dtype: torch.dtype | None = None,
+        *,
+        input_ids: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        raise NotImplementedError
+
+    def select_experts(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        topk_indices_dtype: torch.dtype | None = None,
+        *,
+        input_ids: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        topk_weights, topk_ids = self._select_experts(
+            hidden_states, router_logits,
+            topk_indices_dtype=topk_indices_dtype,
+            input_ids=input_ids,
         )
-        routing_weights = F.softmax(routing_weights, dim=-1)
-        return routing_weights, expert_indices
+        if self._routing_replay_out is not None:
+            self._routing_replay_out[: topk_ids.shape[0]].copy_(
+                topk_ids.to(torch.int16)
+            )
+        return topk_weights, topk_ids

@@ -19,6 +19,10 @@ if TYPE_CHECKING:
     from my_vllm.config.vllm import VllmConfig
 
 
+# Compatibility export for legacy tests
+_DirectModelState = None  # Removed; use DefaultModelState instead
+
+
 class Worker(WorkerBase):
     """GPU Worker owning ModelRunner — mirrors vLLM V1 Worker.
 

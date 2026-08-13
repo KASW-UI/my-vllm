@@ -1,3 +1,14 @@
-from my_vllm.model_executor.layers.fused_moe.layer import FusedMoE  # noqa: F401
-from my_vllm.model_executor.layers.fused_moe.fused_moe import ExpertMLP  # noqa: F401
-from my_vllm.model_executor.layers.fused_moe.router.fused_moe_router import FusedMoERouter  # noqa: F401
+"""FusedMoE module — aligns with vLLM vllm/model_executor/layers/fused_moe/."""
+
+from .config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    MoEActivation,
+    RoutingMethodType,
+)
+from .layer import FusedMoE
+from .router.gate_linear import GateLinear
+from .router.fused_moe_router import FusedMoERouter
+from .router.fused_topk_router import FusedTopKRouter
+from .routed_experts import RoutedExperts
+from .runner.moe_runner import MoERunner

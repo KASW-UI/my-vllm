@@ -1,15 +1,15 @@
-"""GPUModelRunner — batched model execution.
+"""GPUModelRunner — batched model execution with vLLM-native model.
 
-Mirrors vLLM V1 v1/worker/gpu_model_runner.py core structure.
+Aligns with vLLM V1 v1/worker/gpu_model_runner.py core structure.
+Uses vLLM-native OPTForCausalLM (model(input_ids, positions)) with
+attention backend (paged KV cache read/write inside FlashAttentionImpl).
 
-C017: replaces per-request prefill/decode with batched prefill and centralized decode.
-C019: adds BlockTables GPU tensor management.
-C020: RequestState replaces Python dicts for per-request state.
-C022: builds CommonAttentionMetadata from InputBatch + BlockTables.
-C023: physical KV cache pool replaces HF past_key_values.
-C024: Sampler (nn.Module) replaces greedy_sample() function.
-C032: model loading moved inside load_model().
-Unified batching: positions = num_computed_tokens + local_offset (aligned with vLLM L1985).
+Key changes from C022-C024 era:
+- model(input_ids, positions) replaces HF model(input_ids, attention_mask)
+- paged KV cache is read/written inside Attention.forward() via FlashAttentionImpl
+- ForwardContext carries attn_metadata to attention layers
+- compute_logits() replaces output.logits
+- No past_key_values / use_cache / attention_mask from HF
 """
 
 from __future__ import annotations
@@ -21,12 +21,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from my_vllm.forward_context import set_forward_context
 from my_vllm.v1.attention.metadata import CommonAttentionMetadata
-from my_vllm.v1.attention.selector import get_attn_backend
-from my_vllm.v1.attention.backends.ops.paged_attn import (
-    gather_cached_kv_pytorch,
-    reshape_and_cache_pytorch,
-)
 from my_vllm.v1.core.sched.output import SchedulerOutput
 from my_vllm.model_executor.model_loader import load_model
 from my_vllm.v1.outputs import ModelRunnerOutput
@@ -48,7 +44,7 @@ def _str_to_torch_dtype(dtype_str: str) -> torch.dtype:
 
 
 class GPUModelRunner:
-    """Batched model executor — mirrors vLLM V1 GPUModelRunner."""
+    """Batched model executor — aligns with vLLM V1 GPUModelRunner."""
 
     _EOS_TOKEN_ID = 2
 
@@ -70,10 +66,8 @@ class GPUModelRunner:
         self.dtype: torch.dtype = _str_to_torch_dtype(mc.dtype)
 
         self.sampler = Sampler()
-        self.attn_backend_cls = get_attn_backend()
         self.attn_metadata: CommonAttentionMetadata | None = None
 
-        # C121: CUDA Event timing
         self._step_ms: float = 0.0
         self._prefill_ms: float = 0.0
         self._decode_ms: float = 0.0
@@ -89,14 +83,12 @@ class GPUModelRunner:
         model = load_model(self.model_name, dtype=self.dtype_str)
         self.model = model
         self.device = next(model.parameters()).device
+        self.dtype = next(model.parameters()).dtype
 
         config = model.config
         self.num_layers = config.num_hidden_layers
-        self.num_kv_heads = getattr(
-            config, "num_key_value_heads", config.num_attention_heads
-        )
+        self.num_kv_heads = config.num_attention_heads
         self.head_dim = config.hidden_size // config.num_attention_heads
-        self.dtype = next(model.parameters()).dtype
 
         self.request_state = RequestState(
             max_num_reqs=self._init_kwargs["max_num_reqs"],
@@ -122,57 +114,17 @@ class GPUModelRunner:
             dtype=self.dtype, device=self.device,
         )
 
-        # C122: CUDA Graph capture/replay for decode
-        self._cuda_graph: torch.cuda.CUDAGraph | None = None
-        self._cuda_graph_batch_size: int = 0
-        self._cuda_graph_pool: torch.cuda.MemPool | None = None
+        self._bind_kv_caches()
 
-    def capture_cuda_graph(self, batch_size: int) -> None:
-        """Capture the decode forward pass into a CUDA graph.
-
-        Mimics vLLM's CUDAGraphRunner: records the static decode computation
-        for a fixed batch size, enabling replay without per-step kernel
-        launch overhead.
-        """
-        if batch_size == self._cuda_graph_batch_size and self._cuda_graph is not None:
-            return
-
-        logger = logging.getLogger(__name__)
-        logger.info("Capturing CUDA graph for batch_size=%d", batch_size)
-
-        # Free previous graph
-        if self._cuda_graph is not None:
-            del self._cuda_graph
-            self._cuda_graph = None
-
-        # Warmup before capture
-        torch.cuda.synchronize()
-
-        # Capture
-        self._cuda_graph_pool = torch.cuda.graph_pool_handle()
-        self._cuda_graph = torch.cuda.CUDAGraph()
-
-        with torch.cuda.graph(self._cuda_graph, pool=self._cuda_graph_pool):
-            if self.model is not None:
-                dummy_input = torch.zeros(
-                    batch_size, self.head_dim * 8,
-                    dtype=self.dtype, device=self.device,
-                )
-                with torch.no_grad():
-                    _ = self.model(dummy_input)
-
-        self._cuda_graph_batch_size = batch_size
-        logger.info("CUDA graph captured for batch_size=%d", batch_size)
-
-    def replay_cuda_graph(self) -> None:
-        """Replay the captured CUDA graph for decode."""
-        if self._cuda_graph is not None:
-            self._cuda_graph.replay()
+    def _bind_kv_caches(self) -> None:
+        for i, layer in enumerate(self.model.model.decoder.layers):
+            k = self.kv_cache_k[i]
+            v = self.kv_cache_v[i]
+            layer.self_attn.attn.bind_kv_cache((k, v))
 
     def execute_model(
         self, scheduler_output: SchedulerOutput
     ) -> ModelRunnerOutput:
-        # C121: CUDA Event timing for GPU execution profiling
         start_event = torch.cuda.Event(enable_timing=True)
         end_event = torch.cuda.Event(enable_timing=True)
         start_event.record()
@@ -202,7 +154,10 @@ class GPUModelRunner:
                 if token is not None:
                     self.request_state.append_output_token(rid, token)
                     sampled_tokens.setdefault(rid, []).append(token)
-            self._decode_ms = prefill_event.elapsed_time(decode_event) if new_reqs else start_event.elapsed_time(decode_event)
+            self._decode_ms = (
+                prefill_event.elapsed_time(decode_event) if new_reqs
+                else start_event.elapsed_time(decode_event)
+            )
 
         end_event.record()
         torch.cuda.synchronize()
@@ -224,10 +179,11 @@ class GPUModelRunner:
 
         cached = scheduler_output.scheduled_cached_reqs
         for i, rid in enumerate(cached.req_ids):
-            new_bids = cached.new_block_ids[i]
-            if new_bids is not None:
-                idx = self.request_state.get_index(rid)
-                self.block_tables.append_block_ids(idx, new_bids)
+            if i < len(cached.new_block_ids):
+                new_bids = cached.new_block_ids[i]
+                if new_bids is not None:
+                    idx = self.request_state.get_index(rid)
+                    self.block_tables.append_block_ids(idx, new_bids)
 
     def _execute_prefill(self, new_datas: list) -> dict[str, int]:
         results: dict[str, int] = {}
@@ -244,7 +200,7 @@ class GPUModelRunner:
 
         input_ids = torch.zeros(
             batch_size, max_len, dtype=torch.long, device=self.device)
-        attention_mask = torch.zeros(
+        positions_tensor = torch.zeros(
             batch_size, max_len, dtype=torch.long, device=self.device)
 
         req_ids = []
@@ -254,16 +210,9 @@ class GPUModelRunner:
             clen = len(chunk)
             input_ids[i, :clen] = torch.tensor(
                 chunk, dtype=torch.long, device=self.device)
-            attention_mask[i, :clen] = 1
-            req_ids.append(d.req_id)
-
-        positions_tensor = torch.zeros(
-            batch_size, max_len, dtype=torch.long, device=self.device)
-        for i, d in enumerate(new_datas):
-            start = d.num_computed_tokens
-            clen = effective_lens[i]
             positions_tensor[i, :clen] = torch.arange(
                 start, start + clen, dtype=torch.long, device=self.device)
+            req_ids.append(d.req_id)
 
         query_start = torch.tensor(
             [0] + effective_lens,
@@ -274,25 +223,29 @@ class GPUModelRunner:
 
         self.block_tables.compute_slot_mappings(query_start, flat_pos, num_tokens)
 
-        self.attn_metadata = self._build_attn_metadata(
-            num_reqs=batch_size,
+        seq_lens = torch.tensor(effective_lens, dtype=torch.int32, device=self.device)
+        self.attn_metadata = CommonAttentionMetadata(
             query_start_loc=query_start,
-            positions=flat_pos,
-            num_tokens=num_tokens,
+            query_start_loc_cpu=query_start.cpu(),
+            seq_lens=seq_lens,
+            seq_lens_cpu=seq_lens.cpu(),
+            num_reqs=batch_size,
+            num_actual_tokens=num_tokens,
             max_query_len=max_len,
+            max_seq_len=max_len,
+            block_table_tensor=self.block_tables.block_table[:batch_size],
+            slot_mapping=self.block_tables.slot_mappings[:num_tokens],
+            positions=flat_pos,
+            causal=True,
         )
 
-        with torch.no_grad():
-            outputs = self.model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                use_cache=True,
-            )
+        attn_metadata_dict = self._build_attn_metadata_dict()
 
-        logits = outputs.logits
-        past_kvs = outputs.past_key_values
+        with set_forward_context(attn_metadata_dict):
+            with torch.no_grad():
+                hidden_states = self.model(input_ids, positions_tensor)
 
-        self._write_kv_to_paged_cache(past_kvs, new_datas, batch_size, effective_lens)
+        logits = self.model.compute_logits(hidden_states)
 
         token_logits = torch.stack(
             [logits[i, effective_lens[i] - 1, :] for i in range(batch_size)])
@@ -332,51 +285,49 @@ class GPUModelRunner:
             dtype=torch.int32, device=self.device,
         )
 
-        block_table = self.block_tables.block_table[:num_reqs]
-        past_key_values = []
-        for layer_idx in range(self.num_layers):
-            keys, values = gather_cached_kv_pytorch(
-                self.kv_cache_k[layer_idx],
-                self.kv_cache_v[layer_idx],
-                block_table, seq_lens, self.block_size,
-            )
-            past_key_values.append((keys, values))
-        past_key_values = tuple(past_key_values)
-
         next_inputs = torch.tensor(
             [[t] for t in valid_tokens], dtype=torch.long, device=self.device)
+        next_positions = seq_lens.unsqueeze(1).to(torch.long)
 
-        with torch.no_grad():
-            outputs = self.model(
-                input_ids=next_inputs,
-                past_key_values=past_key_values,
-                use_cache=True,
-            )
+        query_start = torch.tensor(
+            [0, num_reqs], dtype=torch.long, device=self.device,
+        )
 
-        logits_flat = outputs.logits[:, -1, :]
-        new_past_kvs = outputs.past_key_values
-        sampled = self.sampler(logits_flat, SamplingMetadata(all_greedy=True))
-
-        decode_slots = []
+        decode_slot_mapping = torch.full(
+            (num_reqs,), -1, dtype=torch.int64, device=self.device,
+        )
         for i, rid in enumerate(valid_reqs):
             idx = self.request_state.get_index(rid)
-            old_seq_len = int(self.request_state.num_computed_tokens_cpu[idx])
-            block_index = old_seq_len // self.block_size
-            block_offset = old_seq_len % self.block_size
-            block_id = int(
-                self.block_tables.block_table[idx, block_index].item())
-            decode_slots.append(block_id * self.block_size + block_offset)
+            slen = int(seq_lens[i].item())
+            block_index = slen // self.block_size
+            block_offset = slen % self.block_size
+            block_id = int(self.block_tables.block_table[idx, block_index].item())
+            decode_slot_mapping[i] = block_id * self.block_size + block_offset
 
-        slot_tensor = torch.tensor(decode_slots, dtype=torch.int64, device=self.device)
-        for layer_idx, (layer_k, layer_v) in enumerate(new_past_kvs):
-            k_last = layer_k[:, :, -1, :]
-            v_last = layer_v[:, :, -1, :]
-            reshape_and_cache_pytorch(
-                k_last, v_last,
-                self.kv_cache_k[layer_idx],
-                self.kv_cache_v[layer_idx],
-                slot_tensor,
-            )
+        self.attn_metadata = CommonAttentionMetadata(
+            query_start_loc=query_start,
+            query_start_loc_cpu=query_start.cpu(),
+            seq_lens=seq_lens,
+            seq_lens_cpu=seq_lens.cpu(),
+            num_reqs=num_reqs,
+            num_actual_tokens=num_reqs,
+            max_query_len=1,
+            max_seq_len=int(seq_lens.max().item()) if num_reqs > 0 else 1,
+            block_table_tensor=self.block_tables.block_table[:num_reqs],
+            slot_mapping=decode_slot_mapping,
+            positions=None,
+            causal=False,
+        )
+
+        attn_metadata_dict = self._build_attn_metadata_dict()
+
+        with set_forward_context(attn_metadata_dict):
+            with torch.no_grad():
+                hidden_states = self.model(next_inputs, next_positions)
+
+        logits = self.model.compute_logits(hidden_states)
+        logits_flat = logits[:, -1, :] if logits.dim() == 3 else logits
+        sampled = self.sampler(logits_flat, SamplingMetadata(all_greedy=True))
 
         for i, rid in enumerate(valid_reqs):
             next_token = int(sampled[i].item())
@@ -388,62 +339,12 @@ class GPUModelRunner:
 
         return results
 
-    def _write_kv_to_paged_cache(
-        self, past_key_values, new_datas: list, batch_size: int,
-        effective_lens: list[int] = None,
-    ) -> None:
-        if effective_lens is None:
-            effective_lens = [len(d.prompt_token_ids) for d in new_datas]
-        padded_len = max(effective_lens)
-        total_tokens = batch_size * padded_len
-        slot_map = self.block_tables.slot_mappings[:total_tokens]
-
-        valid = torch.zeros(total_tokens, dtype=torch.bool, device=self.device)
-        offset = 0
-        for plen in effective_lens:
-            valid[offset:offset + plen] = True
-            offset += padded_len
-
-        for layer_idx, (layer_k, layer_v) in enumerate(past_key_values):
-            bsz, nheads, _, hdim = layer_k.shape
-            k_flat = layer_k.permute(0, 2, 1, 3).reshape(
-                bsz * padded_len, nheads, hdim)
-            v_flat = layer_v.permute(0, 2, 1, 3).reshape(
-                bsz * padded_len, nheads, hdim)
-            reshape_and_cache_pytorch(
-                k_flat[valid], v_flat[valid],
-                self.kv_cache_k[layer_idx],
-                self.kv_cache_v[layer_idx],
-                slot_map[valid],
-            )
-
-    def _build_attn_metadata(
-        self,
-        num_reqs: int,
-        query_start_loc: torch.Tensor,
-        positions: torch.Tensor,
-        num_tokens: int,
-        max_query_len: int,
-    ) -> CommonAttentionMetadata:
-        seq_lens = torch.tensor(
-            [self.request_state.get_step(rid) for rid in
-             self.request_state.req_id_to_index],
-            dtype=torch.int32, device=self.device,
-        )[:num_reqs]
-
-        return CommonAttentionMetadata(
-            query_start_loc=query_start_loc,
-            query_start_loc_cpu=query_start_loc.cpu(),
-            seq_lens=seq_lens,
-            seq_lens_cpu=seq_lens.cpu(),
-            num_reqs=num_reqs,
-            num_actual_tokens=num_tokens,
-            max_query_len=max_query_len,
-            max_seq_len=max_query_len,
-            block_table_tensor=self.block_tables.block_table[:num_reqs],
-            slot_mapping=self.block_tables.slot_mappings[:num_tokens],
-            positions=positions,
-        )
+    def _build_attn_metadata_dict(self) -> dict[str, CommonAttentionMetadata]:
+        result: dict[str, CommonAttentionMetadata] = {}
+        for layer in self.model.model.decoder.layers:
+            name = layer.self_attn.attn.layer_name
+            result[name] = self.attn_metadata
+        return result
 
     def get_step(self, request_id: str) -> int:
         return self.request_state.get_step(request_id)

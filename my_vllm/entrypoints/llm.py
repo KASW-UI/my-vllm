@@ -1,12 +1,21 @@
 from transformers import AutoTokenizer
+import os
 
 from my_vllm.config.vllm import EngineConfig
 from my_vllm.v1.engine.llm_engine import LLMEngine
 from my_vllm.v1.executor.uniproc_executor import UniProcExecutor
 
+_LOCAL_MODEL_PATH = "/home/kasw/文档/GitHub/cpu-vllm/opt-125m"
 
-def load_tokenizer(model_name: str) -> AutoTokenizer:
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+
+def load_tokenizer(model_name: str | object = "facebook/opt-125m") -> AutoTokenizer:
+    model_path = _LOCAL_MODEL_PATH
+    if isinstance(model_name, str):
+        if os.path.isdir(model_name):
+            model_path = model_name
+    tokenizer = AutoTokenizer.from_pretrained(
+        model_path, local_files_only=True,
+    )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     return tokenizer
