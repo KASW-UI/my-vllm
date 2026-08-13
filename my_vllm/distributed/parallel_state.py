@@ -3,6 +3,10 @@
 C013: world_size=1 defaults, all TP ops degrade to identity.
 C050: real torch.distributed all_gather/all_reduce when world_size>1.
 C083: GroupCoordinator + initialize_model_parallel with NCCL process groups.
+C150: canonical `init_distributed_environment(world_size, rank,
+distributed_init_method, local_rank, backend)` entry point that
+matches vLLM's. Spawned workers call this from `Worker
+.init_device()` to set up NCCL before TP groups are created.
 """
 
 import os
@@ -182,6 +186,50 @@ def initialize_model_parallel(
         local_rank=local_rank,
         backend=backend,
         group_name="tp",
+    )
+
+
+def init_distributed_environment(
+    world_size: int = -1,
+    rank: int = -1,
+    distributed_init_method: str = "env://",
+    local_rank: int = -1,
+    backend: str = "nccl",
+) -> None:
+    """Initialise the torch.distributed process group for NCCL.
+
+    Mirrors vLLM V1 distributed/parallel_state.py:
+    init_distributed_environment. C150: real implementation (was
+    a no-op stub in C083). Spawned workers from
+    `MultiprocExecutor._init_executor` call this as the first
+    step in `Worker.init_device()` before the model is loaded.
+
+    Reads `WORLD_SIZE` / `RANK` / `LOCAL_RANK` from env vars
+    when the corresponding arg is `-1` (the vLLM convention).
+    For `env://` init method, `MASTER_ADDR` / `MASTER_PORT`
+    must also be set — `MultiprocExecutor._init_executor` does
+    that when it spawns workers.
+    """
+    if dist.is_initialized():
+        return
+
+    if world_size == -1:
+        world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if rank == -1:
+        rank = int(os.environ.get("RANK", "0"))
+    if local_rank == -1:
+        local_rank = int(os.environ.get("LOCAL_RANK", str(rank)))
+
+    # NCCL requires GPU. Fall back to gloo for the rare
+    # CPU-only test path (mirrors vLLM's runtime fallback).
+    if backend == "nccl" and not torch.cuda.is_available():
+        backend = "gloo"
+
+    dist.init_process_group(
+        backend=backend,
+        init_method=distributed_init_method,
+        world_size=world_size,
+        rank=rank,
     )
 
 

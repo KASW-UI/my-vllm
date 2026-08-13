@@ -4,12 +4,20 @@ Mirrors vLLM V1 v1/executor/multiproc_executor.py (education version).
 
 C080: spawns one Worker process per GPU rank, dispatches SchedulerOutput
 via pickle, collects ModelRunnerOutput.
+C150: real NCCL rendezvous — opens a TCP port, exports
+`MASTER_ADDR` / `MASTER_PORT` / `WORLD_SIZE` / `RANK` /
+`LOCAL_RANK` env vars before spawning workers. Each worker's
+`Worker.init_device()` calls `init_distributed_environment(...)
+→ initialize_model_parallel(...)` (canonical vLLM sequence)
+before loading the model.
 """
 
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
 import signal
+import socket
 from queue import Empty
 from typing import TYPE_CHECKING
 
@@ -23,12 +31,25 @@ if TYPE_CHECKING:
     from my_vllm.config.vllm import VllmConfig
 
 
+def _get_open_port() -> int:
+    """Bind to port 0, read the assigned port, release.
+
+    Mirrors vLLM's `vllm.utils.network_utils.get_open_port` —
+    atomically grabs a free port from the kernel so concurrent
+    executor instances don't collide.
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
 class MultiprocExecutor(Executor):
     """Multiprocess executor — one Worker process per GPU.
 
     Aligns with vLLM MultiprocExecutor:
     - spawns Worker processes with rank/local_rank
-    - each worker calls init_device() → init_distributed → load_model
+    - each worker calls init_device() → init_distributed_environment
+      → initialize_model_parallel → load_model
     - execute_model() dispatches to all workers, returns output from rank 0
     """
 
@@ -37,18 +58,38 @@ class MultiprocExecutor(Executor):
     def __init__(self, vllm_config: VllmConfig):
         super().__init__(vllm_config)
         self.world_size = vllm_config.parallel_config.world_size
+        self.tensor_parallel_size = (
+            vllm_config.parallel_config.tensor_parallel_size
+        )
 
         self._workers: list[mp.Process] = []
         self._input_queues: list[mp.Queue] = []
         self._output_queues: list[mp.Queue] = []
+        self._master_port: int | None = None
 
     def _init_executor(self) -> None:
-        """Spawn worker processes — aligns with vLLM _init_executor."""
+        """Spawn worker processes — aligns with vLLM _init_executor.
+
+        C150: allocates a free TCP port and exports NCCL rendezvous
+        env vars (`MASTER_ADDR`, `MASTER_PORT`, `WORLD_SIZE`,
+        `RANK`, `LOCAL_RANK`). Spawned workers read these via
+        `env://` to join the same NCCL process group.
+        """
         assert torch.cuda.is_available(), "MultiprocExecutor requires CUDA"
+
+        self._master_port = _get_open_port()
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = str(self._master_port)
+        os.environ["WORLD_SIZE"] = str(self.world_size)
 
         for rank in range(self.world_size):
             input_q: mp.Queue = mp.Queue()
             output_q: mp.Queue = mp.Queue()
+
+            # Per-rank env vars so workers don't inherit stale
+            # values from a prior executor in the same process.
+            os.environ["RANK"] = str(rank)
+            os.environ["LOCAL_RANK"] = str(rank)
 
             proc = mp.Process(
                 target=_worker_main,
