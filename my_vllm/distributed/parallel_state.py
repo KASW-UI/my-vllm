@@ -13,6 +13,8 @@ import torch.distributed as dist
 
 _TP: "GroupCoordinator | None" = None
 _PP: "GroupCoordinator | None" = None
+_DP: "GroupCoordinator | None" = None
+_CP: "GroupCoordinator | None" = None
 
 
 class GroupCoordinator:
@@ -204,15 +206,128 @@ def get_tp_rank() -> int:
     return _TP.rank_in_group
 
 
+def get_dp_group() -> "GroupCoordinator | None":
+    """Return the data-parallel group, or None if not initialized.
+
+    Mirrors vLLM V1 distributed/parallel_state.py:get_dp_group.
+    """
+    return _DP
+
+
+def get_cp_group() -> "GroupCoordinator | None":
+    """Return the context-parallel group, or None if not initialized.
+
+    Mirrors vLLM V1 distributed/parallel_state.py:get_cp_group.
+    """
+    return _CP
+
+
+def get_dp_world_size() -> int:
+    return 1 if _DP is None else _DP.world_size
+
+
+def get_dp_rank() -> int:
+    return 0 if _DP is None else _DP.rank_in_group
+
+
+def get_cp_world_size() -> int:
+    return 1 if _CP is None else _CP.world_size
+
+
+def get_cp_rank() -> int:
+    return 0 if _CP is None else _CP.rank_in_group
+
+
+def init_data_parallel(
+    data_parallel_size: int,
+    tensor_model_parallel_size: int = 1,
+) -> None:
+    """Initialize the data-parallel group.
+
+    Mirrors vLLM V1 initialize_model_parallel (data-parallel subset).
+
+    Splits the world into `data_parallel_size` replicas, each owning
+    `tensor_model_parallel_size` ranks. For my-vllm's single-process
+    default (world_size=1) this is a no-op; it requires a real
+    multi-process NCCL setup.
+
+    C141: stub — wires up a `_DP` group when dp_size > 1. Full
+    rank-placement logic (TP × DP) is deferred to 阶段 4 follow-up.
+    """
+    global _DP
+    if data_parallel_size <= 1 or not dist.is_initialized():
+        _DP = None
+        return
+    # Construct replica groups: each DP replica owns TP-consecutive ranks.
+    world_size = dist.get_world_size()
+    dp_size = data_parallel_size
+    tp_size = tensor_model_parallel_size
+    assert world_size == dp_size * tp_size, (
+        f"world_size ({world_size}) != dp_size ({dp_size}) * "
+        f"tp_size ({tp_size})"
+    )
+    dp_group_ranks = [
+        list(range(r * tp_size, (r + 1) * tp_size)) for r in range(dp_size)
+    ]
+    _DP = GroupCoordinator(
+        group_ranks=dp_group_ranks,
+        local_rank=dist.get_rank() % tp_size,
+        backend="nccl",
+        group_name="dp_group",
+    )
+
+
+def init_context_parallel(
+    context_parallel_size: int,
+    tensor_model_parallel_size: int = 1,
+) -> None:
+    """Initialize the context-parallel group.
+
+    Mirrors vLLM V1 initialize_model_parallel (context-parallel subset).
+
+    C142: stub — wires up a `_CP` group when cp_size > 1. Full
+    rank-placement (TP × CP) is deferred to 阶段 4 follow-up.
+    """
+    global _CP
+    if context_parallel_size <= 1 or not dist.is_initialized():
+        _CP = None
+        return
+    world_size = dist.get_world_size()
+    cp_size = context_parallel_size
+    tp_size = tensor_model_parallel_size
+    assert world_size == cp_size * tp_size, (
+        f"world_size ({world_size}) != cp_size ({cp_size}) * "
+        f"tp_size ({tp_size})"
+    )
+    cp_group_ranks = [
+        list(range(r * tp_size, (r + 1) * tp_size)) for r in range(cp_size)
+    ]
+    _CP = GroupCoordinator(
+        group_ranks=cp_group_ranks,
+        local_rank=dist.get_rank() % tp_size,
+        backend="nccl",
+        group_name="cp_group",
+    )
+
+
 def model_parallel_is_initialized() -> bool:
     return _TP is not None
 
 
 def destroy_model_parallel() -> None:
-    global _TP
+    global _TP, _PP, _DP, _CP
     if _TP is not None:
         _TP.destroy()
         _TP = None
+    if _PP is not None:
+        _PP.destroy()
+        _PP = None
+    if _DP is not None:
+        _DP.destroy()
+        _DP = None
+    if _CP is not None:
+        _CP.destroy()
+        _CP = None
     if dist.is_initialized():
         dist.destroy_process_group()
 
