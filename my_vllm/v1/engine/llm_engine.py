@@ -6,8 +6,8 @@ RequestOutput from EngineCore.step().
 C026: InputProcessor handles prompt → tokenize → Request.
 C126: LLMEngine holds an EngineCoreClient (InprocClient / BusyLoopClient)
 instead of an EngineCore directly. Default ``busy_loop=False`` keeps the
-caller-driven semantics of run.py / LLMEngine.generate(). AsyncLLM /
-api_server rewire to BusyLoopClient at C127.
+caller-driven semantics of run.py / LLMEngine.generate(). AsyncLLM rewires
+to BusyLoopClient at C127.
 """
 
 from __future__ import annotations

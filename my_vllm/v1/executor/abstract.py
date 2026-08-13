@@ -29,17 +29,16 @@ class Executor(ABC):
       MultiprocExecutor — multiple workers, multiprocess
     """
 
-    uses_ray: bool = False
     supports_pp: bool = False
 
     @staticmethod
     def get_class(vllm_config: VllmConfig) -> type[Executor]:
         """Factory: select executor implementation from VllmConfig.
 
-        Mirrors vLLM V1 Executor.get_class(vllm_config).
+        Mirrors vLLM V1 Executor.get_class(vllm_config) (subset —
+        only `mp` and `uni` backends. Ray is excluded per
+        `docs/alignment-plan.md` §0.)
         """
-        from my_vllm.config.vllm import VllmConfig as _V
-
         backend = getattr(
             vllm_config.parallel_config,
             "distributed_executor_backend",
@@ -54,9 +53,6 @@ class Executor(ABC):
         if backend == "mp":
             from my_vllm.v1.executor.multiproc_executor import MultiprocExecutor
             return MultiprocExecutor
-        if backend == "ray":
-            from my_vllm.v1.executor.ray_executor import RayDistributedExecutor
-            return RayDistributedExecutor
 
         from my_vllm.v1.executor.uniproc_executor import UniProcExecutor
         return UniProcExecutor
