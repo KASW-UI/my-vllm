@@ -135,6 +135,23 @@ class KVCacheManager:
         # Flat: single group, so collapse the 2-level structure.
         return self.coordinator.get_block_ids(request_id)[0]
 
+    def cache_blocks(
+        self,
+        request: Request,
+        num_tokens: int,
+    ) -> None:
+        """Promote `request`'s blocks into the local prefix-cache map.
+
+        Mirrors vLLM V1 kv_cache_manager.py:KVCacheManager.cache_blocks.
+
+        C143: distributed KV cache ↔ block-hash integration.
+        Called after a successful prefill or after a
+        connector-reported prefix-cache hit (via
+        `get_num_new_matched_tokens`). Delegates to the
+        coordinator → SingleTypeKVCacheManager.
+        """
+        self.coordinator.cache_blocks(request, num_tokens)
+
     def get_blocks(self, request_id: str) -> list[KVCacheBlock]:
         return self.request_blocks.get(request_id, [])
 

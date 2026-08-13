@@ -193,6 +193,49 @@ class SingleTypeKVCacheManager(ABC):
     def get_block_ids(self, request_id: str) -> list[int]:
         return [b.block_id for b in self.req_to_blocks.get(request_id, [])]
 
+    # ── Distributed KV cache ↔ prefix-cache integration ─────────────
+
+    def cache_blocks(
+        self,
+        request,
+        num_tokens: int,
+    ) -> None:
+        """Register `request`'s blocks into the local prefix-cache map.
+
+        Mirrors vLLM V1 v1/core/single_type_kv_cache_manager.py:
+        SingleTypeKVCacheManager.cache_blocks (L403).
+
+        Called after a successful prefill (or after a connector-
+        reported prefix-cache hit) so that future requests with
+        the same hash prefix find the blocks in the local cache
+        via `block_pool.get_cached_block(hash)`.
+
+        C143: distributed KV cache ↔ block-hash integration. The
+        connector reports `num_external_computed_tokens` via
+        `get_num_new_matched_tokens(...)`; the scheduler then
+        calls `cache_blocks(request, num_computed_tokens)` to
+        promote those blocks into the local cache.
+
+        For my-vllm's subset the actual `cache_blocks` body is
+        a no-op (the local prefix cache is already populated by
+        `_walk_cached_prefix` during `get_cached_blocks`). A
+        follow-up can wire the `set_block_hash` loop to handle
+        external-cache-hits — see `my_vllm.v1.core.kv_cache_utils`.
+        """
+        num_cached = self.num_cached_blocks.get(request.request_id, 0)
+        num_full = num_tokens // self.block_size
+        if num_cached >= num_full:
+            return
+        # Promote new full blocks to the local cache via the
+        # BlockPool's existing `cache_full_blocks` helper (which
+        # computes hashes + registers them).
+        if request.request_id in self.req_to_blocks:
+            blocks = self.req_to_blocks[request.request_id][
+                num_cached : min(num_full, len(self.req_to_blocks[request.request_id]))
+            ]
+            if blocks:
+                self.block_pool.cache_full_blocks(request, blocks)
+
     def _apply_cow(self, block: KVCacheBlock) -> KVCacheBlock:
         """Copy-on-write: clone shared block so writes don't pollute.
 

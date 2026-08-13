@@ -196,3 +196,21 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
 
     def take_kv_cache_block_copies(self):
         return self.manager.take_kv_cache_block_copies()
+
+    def cache_blocks(
+        self,
+        request: "Request",
+        num_tokens: int,
+    ) -> None:
+        """Promote `request`'s blocks into the local prefix-cache map.
+
+        Mirrors vLLM V1 v1/core/kv_cache_coordinator.py:
+        UnitaryKVCacheCoordinator.cache_blocks (forwarded to
+        the underlying SingleTypeKVCacheManager.cache_blocks).
+
+        C143: distributed KV cache ↔ block-hash integration.
+        Called after a successful prefill or after the
+        `KVConnectorBase_V1` reports a prefix-cache hit (via
+        `get_num_new_matched_tokens`).
+        """
+        self.manager.cache_blocks(request, num_tokens)

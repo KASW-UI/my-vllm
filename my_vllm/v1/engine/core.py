@@ -476,7 +476,9 @@ class EngineCore:
         For each received bundle:
         1. Allocate blocks in local BlockPool.
         2. Register request in scheduler with all tokens already computed.
-        3. Send ACK back to producer.
+        3. Promote blocks into local prefix-cache via
+           `kv_cache_manager.cache_blocks(...)` (C143 integration).
+        4. Send ACK back to producer.
 
         For failed transfers:
         - policy=="fail": mark request FINISHED_ERROR.
@@ -503,6 +505,11 @@ class EngineCore:
             req.status = RequestStatus.RUNNING
 
             self.kv_cache_manager.allocate_slots(req, bundle.num_tokens)
+            # C143: promote the transferred blocks into the local
+            # prefix cache so subsequent requests sharing the same
+            # hash prefix can hit via get_cached_block(...) without
+            # going through the connector again.
+            self.kv_cache_manager.cache_blocks(req, bundle.num_tokens)
             self.scheduler.running.append(req)
 
             if self.kv_connector is not None:
