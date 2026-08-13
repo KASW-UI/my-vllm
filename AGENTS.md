@@ -23,9 +23,9 @@ Every file in `my_vllm/` must correspond to a real file in `vllm/`. No invented 
 
 **Previous history**: Stages C000→C098 were implemented under a prior "educational simulation" model. That history is preserved (never squash/rebase). The project now enters a new phase of **engineering alignment** (C110+) — see `Engineer-Spec/README.md` for the full specification.
 
-**Current status**: C110 baseline. 6 invented files deleted, file tree now strict subset of vLLM. FlashAttentionBackend operational (SDPA-based).
+**Current status**: C124. EngineCore has the vLLM V1 busy-loop primitives (`run_busy_loop` + input/output queues + `EngineShutdownState` + `EngineCoreRequestType` {ADD/ABORT/WAKEUP}). The loop is *formable*; `LLMEngine.generate()` is still caller-driven (`while has_work(): step()`) — `EngineCoreClient` (InprocClient / BusyLoopClient) wiring lands at C125 per `LOOP-PLAN.md`.
 
-**Next**: Phase 1.2 per Engineer-Spec — `runtime/` → `entrypoints/` path alignment. 10 P0 skeletons pending thereafter.
+**Next**: C125 — `EngineCoreClient` abstraction (`InprocClient` / `BusyLoopClient`); C126 wires `LLMEngine` to the client; C127 rewires `AsyncLLM` + `api_server`; C128 closes the loop with verification + docs.
 
 ## Commands
 

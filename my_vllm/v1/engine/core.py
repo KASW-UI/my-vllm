@@ -14,13 +14,19 @@ C112: P/D disaggregation (NIXL), LoRA multiplexing, multi-tenant quotas,
 C121: tighten step() body to a top-to-bottom pipeline. Every concern
       beyond schedule/execute/update_from_output is delegated to a
       helper; the main path reads top-to-bottom like nano-vllm.
+C124: EngineCoreRequestType + EngineShutdownState + input/output queues
+      + run_busy_loop primitives (no DP / ZMQ / batch_queue). The loop
+      still defaults to caller-driven step(); BusyLoopClient arrives at
+      C125.
 """
 
 from __future__ import annotations
 
 import logging
+import queue
 import time
-from typing import TYPE_CHECKING
+from enum import IntEnum
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -29,7 +35,7 @@ from my_vllm.v1.core.kv_cache_manager import KVCacheManager
 from my_vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from my_vllm.v1.core.kv_connector import TransferBundle
 from my_vllm.v1.core.sched.scheduler import Scheduler
-from my_vllm.v1.engine import EngineCoreOutputs
+from my_vllm.v1.engine import EngineCoreOutputs, EngineCoreRequestType
 from my_vllm.v1.executor.abstract import Executor
 from my_vllm.v1.metrics.loggers import LoggingStatLogger, StatLoggerBase
 from my_vllm.v1.metrics.stats import (
@@ -46,6 +52,17 @@ if TYPE_CHECKING:
     from my_vllm.v1.core.kv_connector import KVConnectorBase_V1
 
 logger = logging.getLogger(__name__)
+
+
+class EngineShutdownState(IntEnum):
+    """Lifecycle state for EngineCore shutdown.
+
+    Mirrors vLLM V1 v1/engine/core.py:EngineShutdownState (L989).
+    """
+
+    RUNNING = 0
+    REQUESTED = 1
+    SHUTTING_DOWN = 2
 
 
 class EngineCore:
@@ -106,6 +123,15 @@ class EngineCore:
             self.failure_policy = self.kv_transfer_config.kv_load_failure_policy
             self._kv_connector_init()
 
+        # C124: busy-loop primitives. input_queue carries
+        # (EngineCoreRequestType, request) tuples from any thread; the
+        # loop owns output_queue and pushes EngineCoreOutputs.
+        self.input_queue: queue.Queue[tuple[EngineCoreRequestType, Any]] = (
+            queue.Queue()
+        )
+        self.output_queue: queue.Queue[EngineCoreOutputs] = queue.Queue()
+        self.shutdown_state = EngineShutdownState.RUNNING
+
     # ── Public API ──────────────────────────────────────────────────────
 
     def add_request(self, request: Request):
@@ -114,6 +140,115 @@ class EngineCore:
 
     def has_work(self) -> bool:
         return self.scheduler.has_work()
+
+    # ── C124: busy-loop primitives ──────────────────────────────────────
+    #
+    # The methods below add `run_busy_loop` + input/output queues to
+    # EngineCore. Caller-driven `step()` is preserved unchanged — Inproc
+    # clients (C125 / C126) keep the current synchronous path; only
+    # BusyLoopClient (C125) actually spins the loop.
+
+    def is_running(self) -> bool:
+        """Returns true if shutdown has not been requested.
+
+        Mirrors vLLM V1 v1/engine/core.py:EngineCore.is_running (L1354).
+        """
+        return self.shutdown_state == EngineShutdownState.RUNNING
+
+    def run_busy_loop(self) -> None:
+        """Core busy loop of the EngineCore.
+
+        Mirrors vLLM V1 v1/engine/core.py:EngineCore.run_busy_loop
+        (L1358). Simplified: no ``SystemExit`` (callers decide exit
+        policy), no DP ``engines_running`` / ``batch_queue`` / DP wave
+        / EEP / UTILITY RPC.
+        """
+        while self._handle_shutdown():
+            # 1) Poll the input queue until there is work to do.
+            self._process_input_queue()
+            # 2) Step the engine core and forward outputs.
+            self._process_engine_step()
+
+    def _process_input_queue(self) -> None:
+        """Block on the input queue until work shows up.
+
+        Mirrors vLLM V1 v1/engine/core.py:_process_input_queue (L1368).
+        Drops the aborts_queue drain (my-vllm merges aborts into
+        input_queue as ADD/ABORT pairs).
+        """
+        while not self.has_work() and self.is_running():
+            try:
+                req = self.input_queue.get()
+            except queue.Empty:
+                break
+            self._handle_client_request(*req)
+
+        # Drain anything that arrived after the first request landed.
+        while not self.input_queue.empty():
+            req = self.input_queue.get_nowait()
+            self._handle_client_request(*req)
+
+    def _process_engine_step(self) -> bool:
+        """Run one step; forward non-empty outputs to the output queue.
+
+        Mirrors vLLM V1 v1/engine/core.py:_process_engine_step (L1399).
+        """
+        outputs = self.step()
+        if outputs.outputs:
+            self.output_queue.put_nowait(outputs)
+        return bool(outputs.outputs)
+
+    def _handle_shutdown(self) -> bool:
+        """Drive the shutdown state machine. Return False to stop the loop.
+
+        Mirrors vLLM V1 v1/engine/core.py:_handle_shutdown (L1423).
+        Simplified: no shutdown_timeout-driven abort/drain (the
+        Config layer does not yet expose ``shutdown_timeout``); the
+        loop simply stops accepting new work and drains whatever is in
+        flight until the scheduler reports no unfinished requests.
+        """
+        if self.shutdown_state == EngineShutdownState.RUNNING:
+            return True
+        if self.shutdown_state == EngineShutdownState.REQUESTED:
+            self.shutdown_state = EngineShutdownState.SHUTTING_DOWN
+        return self.has_work()
+
+    def _handle_client_request(
+        self,
+        request_type: EngineCoreRequestType,
+        request: Any,
+    ) -> None:
+        """Dispatch a request pulled from the input queue.
+
+        Mirrors vLLM V1 v1/engine/core.py:_handle_client_request (L1471).
+        Only ADD / ABORT / WAKEUP are honored; UTILITY / EXECUTOR_FAILED
+        are out of scope (LOOP-PLAN §2 C124).
+        """
+        if request_type == EngineCoreRequestType.ADD:
+            self.add_request(request)
+        elif request_type == EngineCoreRequestType.ABORT:
+            self.scheduler.finish_requests(
+                request, RequestStatus.FINISHED_ABORTED,
+            )
+        elif request_type == EngineCoreRequestType.WAKEUP:
+            return
+        else:
+            logger.error(
+                "Unrecognized input request type encountered: %s",
+                request_type,
+            )
+
+    def shutdown(self) -> None:
+        """Request graceful shutdown; wake the busy loop via WAKEUP.
+
+        Mirrors vLLM V1 v1/engine/core.py:EngineCore.shutdown (L743)
+        for the queue-handshake part (the resource teardown at the
+        end of vLLM's shutdown lives in EngineCoreProc and is not
+        relevant to the in-process EngineCore class).
+        """
+        self.shutdown_state = EngineShutdownState.REQUESTED
+        # Sentinel to unblock _process_input_queue.get() if it is idle.
+        self.input_queue.put((EngineCoreRequestType.WAKEUP, None))
 
     def step(self) -> EngineCoreOutputs:
         """One scheduling + execution step. Top-to-bottom pipeline."""
