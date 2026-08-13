@@ -23,9 +23,9 @@ Every file in `my_vllm/` must correspond to a real file in `vllm/`. No invented 
 
 **Previous history**: Stages C000→C098 were implemented under a prior "educational simulation" model. That history is preserved (never squash/rebase). The project now enters a new phase of **engineering alignment** (C110+) — see `Prompt/Engineer-Spec/README.md` for the full specification.
 
-**Current status**: C133. 阶段 0–1 alignment complete (10/10 file-tree items closed). KV cache hierarchy now mirrors vLLM's 3-level structure (Manager → Coordinator → SingleTypeKVCacheManager → FullAttentionManager). `KVConnectorBase_V1` migrated to vLLM-canonical `distributed/.../v1/base.py` with `KVConnectorFactory`. Invented-file count: 0. See `docs/snapshots/C133.md` for closure write-up.
+**Current status**: C140. 阶段 0–3 alignment complete (37/37 items). KV cache hierarchy mirrors vLLM (Manager → Coordinator → SingleTypeKVCacheManager → FullAttentionManager). KV transfer migrated to vLLM-canonical `distributed/.../v1/base.py` with `KVConnectorFactory` + `ExampleConnector`. Scheduler has 3-level pipeline + utils + AsyncScheduler skeleton. FP8 path importable (fp8_utils Triton kernel round-trips). spec_decode / parallel_sampling / logprobs skeletons exist. Invented-file count: 0. See `docs/snapshots/C140.md` for closure write-up.
 
-**Next**: 阶段 2 P0 object boundaries per `docs/alignment-plan.md` §5 — `kv_cache_coordinator.py` (Manager→Coordinator→Group hierarchy), `single_type_kv_cache_manager.py`, `sched/utils.py`, `sched/async_scheduler.py`, `worker/gpu/model_runner.py`.
+**Next**: 阶段 4 分布式多机抽象 per `docs/alignment-plan.md` §7 — `tensor_ipc.py`, `coordinator.py`, DP/CP utils, TP/PP/EP/CP end-to-end pathways. LoRA专项 (§8) for one working Dense-Linear path.
 
 ## Scope decision (JD-driven)
 
