@@ -1,9 +1,16 @@
-"""Logits processor — apply penalties before sampling.
+"""Logits processor builtins — repetition / frequency / presence penalties.
 
-Mirrors vLLM V1 v1/sample/ops/penalties.py (simplified).
+Mirrors vLLM V1 v1/sample/logits_processor/builtin.py (the penalty
+subset only — MinP / MinTokens / LogitBias are excluded as they
+serve structured-output / guidance, which is out of scope per
+docs/alignment-plan.md).
 
 C024: applies repetition, frequency, and presence penalties
 to logits before sampling.
+
+C132: extracted from the former single-file `v1/sample/logits_processor.py`
+into the package layout matching vLLM
+(vllm/v1/sample/logits_processor/{interface.py,builtin.py,state.py}).
 """
 
 import torch
