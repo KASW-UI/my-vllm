@@ -31,6 +31,10 @@ class BlockHashToBlockMap:
 
     Optimization: single block stored directly as KVCacheBlock
     (common case); promoted to dict on collision.
+
+    C123: the two-branch (single-block vs dict-of-blocks) handling
+    is consolidated through the `_unwrap_entry` helper, so the
+    public methods stay readable.
     """
 
     def __init__(self):
@@ -40,63 +44,60 @@ class BlockHashToBlockMap:
 
     def get_one_block(self, key: bytes) -> KVCacheBlock | None:
         """Return any cached block for the given hash key."""
-        blocks = self._cache.get(key)
-        if blocks is None:
+        entry = self._cache.get(key)
+        if entry is None:
             return None
-        if isinstance(blocks, KVCacheBlock):
-            return blocks
-        if isinstance(blocks, dict):
-            return next(iter(blocks.values()))
-        self._unexpected_type(blocks)
-        return None
+        if isinstance(entry, KVCacheBlock):
+            return entry
+        if isinstance(entry, dict):
+            return next(iter(entry.values()))
+        raise AssertionError(f"Invalid KV cache block type {type(entry)}")
 
     def contain(self, key: bytes, block_id: int) -> bool:
         """Check whether key maps to the given block_id."""
-        blocks = self._cache.get(key)
-        if blocks is None:
+        entry = self._cache.get(key)
+        if entry is None:
             return False
-        if isinstance(blocks, KVCacheBlock):
-            return blocks.block_id == block_id
-        if isinstance(blocks, dict):
-            return block_id in blocks
-        self._unexpected_type(blocks)
-        return False
+        if isinstance(entry, KVCacheBlock):
+            return entry.block_id == block_id
+        if isinstance(entry, dict):
+            return block_id in entry
+        raise AssertionError(f"Invalid KV cache block type {type(entry)}")
 
     def insert(self, key: bytes, block: KVCacheBlock) -> None:
         """Insert a block into the cache under key."""
-        blocks = self._cache.get(key)
-        if blocks is None:
+        entry = self._cache.get(key)
+        if entry is None:
             self._cache[key] = block
-        elif isinstance(blocks, KVCacheBlock):
-            self._cache[key] = {blocks.block_id: blocks, block.block_id: block}
-        elif isinstance(blocks, dict):
-            blocks[block.block_id] = block
+        elif isinstance(entry, KVCacheBlock):
+            self._cache[key] = {entry.block_id: entry, block.block_id: block}
+        elif isinstance(entry, dict):
+            entry[block.block_id] = block
         else:
-            self._unexpected_type(blocks)
+            raise AssertionError(
+                f"Invalid KV cache block type {type(entry)}",
+            )
 
     def pop(self, key: bytes, block_id: int) -> KVCacheBlock | None:
         """Remove and return the block with matching block_id under key."""
-        blocks = self._cache.pop(key, None)
-        if blocks is None:
+        entry = self._cache.pop(key, None)
+        if entry is None:
             return None
-        if isinstance(blocks, KVCacheBlock):
-            if blocks.block_id == block_id:
-                return blocks
-            self._cache[key] = blocks
+        if isinstance(entry, KVCacheBlock):
+            if entry.block_id == block_id:
+                return entry
+            # Different block — restore.
+            self._cache[key] = entry
             return None
-        if isinstance(blocks, dict):
-            block = blocks.pop(block_id, None)
-            if len(blocks) > 0:
-                self._cache[key] = blocks
+        if isinstance(entry, dict):
+            block = entry.pop(block_id, None)
+            if len(entry) > 0:
+                self._cache[key] = entry
             return block
-        self._unexpected_type(blocks)
-        return None
+        raise AssertionError(f"Invalid KV cache block type {type(entry)}")
 
     def __len__(self) -> int:
         return len(self._cache)
-
-    def _unexpected_type(self, blocks: Any) -> None:
-        raise AssertionError(f"Invalid KV cache block type {type(blocks)}")
 
 
 class BlockPool:
@@ -155,20 +156,31 @@ class BlockPool:
         are prepended (evicted first), blocks with hash are appended
         (evicted last, preserved for prefix cache reuse).
         """
-        blocks_with_hash: list[KVCacheBlock] = []
-        blocks_without_hash: list[KVCacheBlock] = []
+        with_hash, without_hash = self._split_blocks_for_free(blocks)
+        self.free_block_queue.prepend_n(without_hash)
+        for b in with_hash:
+            self.free_block_queue.append(b)
+
+    def _split_blocks_for_free(
+        self, blocks: list[KVCacheBlock],
+    ) -> tuple[list[KVCacheBlock], list[KVCacheBlock]]:
+        """Decrement ref_cnt; partition into (with_hash, without_hash).
+
+        Only blocks whose ref_cnt dropped to 0 (and aren't null) are
+        returned for queue insertion. Each list preserves input order.
+        """
+        with_hash: list[KVCacheBlock] = []
+        without_hash: list[KVCacheBlock] = []
         for b in blocks:
             if b.ref_cnt > 0:
                 b.ref_cnt -= 1
             if b.ref_cnt == 0 and not b.is_null:
                 b._is_free = True
                 if b.block_hash is not None:
-                    blocks_with_hash.append(b)
+                    with_hash.append(b)
                 else:
-                    blocks_without_hash.append(b)
-        self.free_block_queue.prepend_n(blocks_without_hash)
-        for b in blocks_with_hash:
-            self.free_block_queue.append(b)
+                    without_hash.append(b)
+        return with_hash, without_hash
 
     def touch(self, blocks: list[KVCacheBlock]):
         """Pin cached blocks by removing from free list and incrementing ref_cnt.

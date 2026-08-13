@@ -100,9 +100,31 @@ class KVCacheManager:
         block_size = self.block_pool.block_size
         max_cache_hit_length = max(0, request.num_tokens - 1)
         request.compute_block_hashes(block_size)
+        cached_blocks, num_computed = self._walk_cached_prefix(
+            request, max_cache_hit_length, block_size,
+        )
+
+        if cached_blocks:
+            self.request_blocks[request.request_id] = cached_blocks
+            return KVCacheBlocks(
+                block_ids=[b.block_id for b in cached_blocks]
+            ), num_computed
+
+        return KVCacheBlocks.empty(), 0
+
+    def _walk_cached_prefix(
+        self,
+        request: Request,
+        max_cache_hit_length: int,
+        block_size: int,
+    ) -> tuple[list[KVCacheBlock], int]:
+        """Walk request.block_hashes, returning cached (and CoW'd) blocks.
+
+        Stops at the first miss or at max_cache_hit_length (reserving the
+        last token for fresh logit computation).
+        """
         cached_blocks: list[KVCacheBlock] = []
         num_computed = 0
-
         for block_hash in request.block_hashes:
             if not block_hash:
                 break
@@ -118,14 +140,7 @@ class KVCacheManager:
                 block_size,
                 request.num_tokens - num_computed,
             )
-
-        if cached_blocks:
-            self.request_blocks[request.request_id] = cached_blocks
-            return KVCacheBlocks(
-                block_ids=[b.block_id for b in cached_blocks]
-            ), num_computed
-
-        return KVCacheBlocks.empty(), 0
+        return cached_blocks, num_computed
 
     def _apply_cow(self, block: KVCacheBlock) -> KVCacheBlock:
         """Copy-on-write: clone shared block so writes don't pollute.
