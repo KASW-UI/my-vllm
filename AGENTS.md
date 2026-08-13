@@ -23,9 +23,9 @@ Every file in `my_vllm/` must correspond to a real file in `vllm/`. No invented 
 
 **Previous history**: Stages C000→C098 were implemented under a prior "educational simulation" model. That history is preserved (never squash/rebase). The project now enters a new phase of **engineering alignment** (C110+) — see `Prompt/Engineer-Spec/README.md` for the full specification.
 
-**Current status**: C140. 阶段 0–3 alignment complete (37/37 items). KV cache hierarchy mirrors vLLM (Manager → Coordinator → SingleTypeKVCacheManager → FullAttentionManager). KV transfer migrated to vLLM-canonical `distributed/.../v1/base.py` with `KVConnectorFactory` + `ExampleConnector`. Scheduler has 3-level pipeline + utils + AsyncScheduler skeleton. FP8 path importable (fp8_utils Triton kernel round-trips). spec_decode / parallel_sampling / logprobs skeletons exist. Invented-file count: 0. See `docs/snapshots/C140.md` for closure write-up.
+**Current status**: C143. 阶段 0–4 alignment complete (44/44 file-tree items closed). KV cache hierarchy mirrors vLLM (Manager → Coordinator → SingleTypeKVCacheManager → FullAttentionManager). KV transfer migrated to vLLM-canonical `distributed/.../v1/base.py` with `KVConnectorFactory` + `ExampleConnector`. Scheduler has 3-level pipeline + utils + AsyncScheduler skeleton. FP8 path importable (fp8_utils Triton kernel round-trips). spec_decode / parallel_sampling / logprobs skeletons exist. Distributed multi-machine infrastructure: DP/CP utils (gpu + worker levels), `tensor_ipc.py`, `coordinator.py`, block-hash ↔ kv_connector integration. Invented-file count: 0. See `docs/snapshots/C143.md` for closure write-up.
 
-**Next**: 阶段 4 分布式多机抽象 per `docs/alignment-plan.md` §7 — `tensor_ipc.py`, `coordinator.py`, DP/CP utils, TP/PP/EP/CP end-to-end pathways. LoRA专项 (§8) for one working Dense-Linear path.
+**Next**: LoRA专项 (§8 of `docs/alignment-plan.md`) for one working Dense-Linear path. The plan lists 11 LoRA files (`layers/base.py`, `layers/base_linear.py`, `layers/{column,row}_parallel_linear.py`, `layers/fused_moe.py`, `lora_model.py`, `model_manager.py`, `worker_manager.py`, `ops/{torch,triton}_ops/...`, `lora_model_runner_mixin.py`). Whether to proceed depends on remaining JD priorities.
 
 ## Scope decision (JD-driven)
 
