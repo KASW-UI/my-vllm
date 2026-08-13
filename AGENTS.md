@@ -23,9 +23,9 @@ Every file in `my_vllm/` must correspond to a real file in `vllm/`. No invented 
 
 **Previous history**: Stages C000→C098 were implemented under a prior "educational simulation" model. That history is preserved (never squash/rebase). The project now enters a new phase of **engineering alignment** (C110+) — see `Engineer-Spec/README.md` for the full specification.
 
-**Current status**: C126. `LLMEngine` rewired to hold an `EngineCoreClient` (default `InprocClient`, `busy_loop=True` → `BusyLoopClient`); pure refactor, `python run.py` output byte-identical to C125; `AsyncLLM` / `api_server` still naive — C127 will switch them to `BusyLoopClient` per `LOOP-PLAN.md`.
+**Current status**: C127. `AsyncLLM` rewritten to drive `engine.step()` via `asyncio.to_thread` against an `LLMEngine(busy_loop=True)`; `examples/server.py` constructs the engine with `busy_loop=True`; naive `run_loop` / `_drain_queue` / `_add_to_engine` and the `asyncio.Queue[AsyncRequest]` are gone.
 
-**Next**: C127 — `AsyncLLM` deletes its naive `run_loop` and goes through `LLMEngine(busy_loop=True)`; `api_server` constructs `LLMEngine(busy_loop=True)`; C128 closes the loop with verification + docs.
+**Next**: C128 — verification + docs (`git grep run_busy_loop` hits `core.py`; `git grep "EngineCore("` no longer hits `llm_engine.py`); LOOP-PLAN §5 done criteria checked off.
 
 ## Commands
 

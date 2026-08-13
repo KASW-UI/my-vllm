@@ -1,144 +1,170 @@
-"""C027: tests for async LLM engine with asyncio.Queue."""
+"""C027/C127: tests for async LLM engine.
+
+C027 originally introduced AsyncLLM with an asyncio.Queue + naive
+``run_loop``. C127 deletes that naive loop and wires AsyncLLM to the
+C125 ``BusyLoopClient`` (via ``LLMEngine(busy_loop=True)``). These
+tests verify the new design.
+"""
+
+from __future__ import annotations
 
 import asyncio
 
-from my_vllm.v1.engine.async_llm import AsyncLLM, AsyncRequest
+from my_vllm.v1.engine.async_llm import AsyncLLM
 
 
-async def _test_future_creation():
-    f = asyncio.Future()
-    req = AsyncRequest(prompt="hi", max_new_tokens=10, future=f)
-    return req.prompt == "hi" and req.max_new_tokens == 10 and req.future is f
+class TestAsyncLLMInit:
+    def test_init_holds_engine(self):
+        class DummyEngine:
+            pass
 
+        engine = DummyEngine()
+        llm = AsyncLLM(engine)
+        assert llm._engine is engine
 
-class TestAsyncRequest:
-    def test_creation(self):
-        assert asyncio.run(_test_future_creation())
+    def test_init_starts_empty_pending(self):
+        class DummyEngine:
+            pass
 
-    def test_create(self):
+        llm = AsyncLLM(DummyEngine())
+        assert llm._pending == {}
+        assert llm.errored is False
+
+    def test_check_health_raises_when_errored(self):
+        class DummyEngine:
+            pass
+
+        llm = AsyncLLM(DummyEngine())
+        llm._errored = True
+
         async def _run():
-            f = asyncio.Future()
-            req = AsyncRequest(prompt="test", future=f)
-            return req.future is f
+            from my_vllm.v1.engine.exceptions import EngineDeadError
+            try:
+                await llm.check_health()
+            except EngineDeadError:
+                return True
+            return False
 
-        assert asyncio.run(_run())
+        assert asyncio.run(_run()) is True
 
-
-class TestAsyncLLMBasic:
-    def test_init(self):
+    def test_dead_error_returns_engine_dead_error(self):
         class DummyEngine:
-            max_new_tokens = 50
+            pass
 
-            def has_work(self):
-                return False
+        from my_vllm.v1.engine.exceptions import EngineDeadError
+        llm = AsyncLLM(DummyEngine())
+        assert isinstance(llm.dead_error, EngineDeadError)
 
-            def step(self):
-                return []
+
+class TestAsyncLLMGenerate:
+    def test_generate_resolves_when_engine_returns_finished_output(self):
+        """End-to-end: AsyncLLM drives engine.step() and resolves the future
+        when the request's finished output arrives."""
+
+        class StubEngine:
+            def __init__(self):
+                self._next_rid = 0
+                self._step_count = 0
 
             def add_request(self, prompt, max_new_tokens=None):
-                return "req-0"
-
-        engine = DummyEngine()
-        llm = AsyncLLM(engine)
-        assert isinstance(llm._queue, asyncio.Queue)
-
-    def test_stop(self):
-        class DummyEngine:
-            max_new_tokens = 50
-
-            def has_work(self):
-                return False
-
-            def step(self):
-                return []
-
-            def add_request(self, prompt, max_new_tokens=None):
-                return "req-0"
-
-        engine = DummyEngine()
-        llm = AsyncLLM(engine)
-        assert not llm._running
-        llm.stop()
-        assert not llm._running
-
-
-class TestAsyncLLMIntegration:
-    def test_generate_resolves(self):
-        """Test that generate() pushes to queue and resolves via step()."""
-
-        class TestEngine:
-            max_new_tokens = 50
-            _requests = []
-            _step_count = 0
-
-            def has_work(self):
-                return bool(self._requests)
+                rid = f"r-{self._next_rid}"
+                self._next_rid += 1
+                return rid
 
             def step(self):
                 self._step_count += 1
-                results = []
-                for req in self._requests.copy():
-                    rid = req.request_id
-                    results.append({
+                rid = f"r-{self._next_rid - 1}"
+                if self._step_count == 1:
+                    return [{
                         "request_id": rid,
-                        "text": "Hello world",
-                        "finish_reason": "FINISHED_STOPPED",
-                        "output_tokens": 3,
+                        "text": "Hi",
+                        "finish_reason": "",
+                        "finished": False,
+                        "output_tokens": 1,
                         "prompt_tokens": 1,
-                    })
-                    self._requests.remove(req)
-                return results
-
-            def add_request(self, prompt, max_new_tokens=None):
-                from my_vllm.v1.request import Request
-                r = Request(request_id=f"r-{len(self._requests)}")
-                self._requests.append(r)
-                return r.request_id
+                    }]
+                return [{
+                    "request_id": rid,
+                    "text": "Hi there",
+                    "finish_reason": "STOPPED",
+                    "finished": True,
+                    "output_tokens": 2,
+                    "prompt_tokens": 1,
+                }]
 
         async def _run():
-            engine = TestEngine()
+            engine = StubEngine()
             llm = AsyncLLM(engine)
-
-            async def step_loop():
-                while True:
-                    await llm._drain_queue()
-                    if engine.has_work():
-                        results = engine.step()
-                        for r in results:
-                            pending = llm._pending.pop(r["request_id"], None)
-                            if pending and not pending.future.done():
-                                pending.future.set_result(r)
-                    elif not llm._running and not engine.has_work():
-                        break
-                    await asyncio.sleep(0)
-
-            llm._running = True
-            loop_task = asyncio.create_task(step_loop())
-
             result = await llm.generate("Hello", max_new_tokens=5)
-            llm._running = False
-            await loop_task
             return result
 
         result = asyncio.run(_run())
-        assert result["text"] == "Hello world"
+        assert result["text"] == "Hi there"
+        assert result["finished"] is True
+        assert result["finish_reason"] == "STOPPED"
 
-    def test_async_queue_not_sync_queue(self):
-        """Verify asyncio.Queue is used, not queue.Queue."""
+    def test_generate_only_resolves_target_request(self):
+        """Two sequential generate() calls each resolve their own future."""
 
-        class DummyEngine:
-            max_new_tokens = 50
-
-            def has_work(self):
-                return False
-
-            def step(self):
-                return []
+        class StubEngine:
+            def __init__(self):
+                self.submitted: list[tuple[str, int | None]] = []
+                self._call = 0
 
             def add_request(self, prompt, max_new_tokens=None):
-                return "r0"
+                rid = f"r-{len(self.submitted)}"
+                self.submitted.append((prompt, max_new_tokens))
+                return rid
 
-        engine = DummyEngine()
-        llm = AsyncLLM(engine)
-        assert isinstance(llm._queue, asyncio.Queue)
+            def step(self):
+                self._call += 1
+                # On the 2nd step, finish the first request;
+                # on the 4th step, finish the second request.
+                if self._call == 2 and len(self.submitted) >= 1:
+                    rid = "r-0"
+                    return [{
+                        "request_id": rid,
+                        "text": "first",
+                        "finish_reason": "STOPPED",
+                        "finished": True,
+                        "output_tokens": 1,
+                        "prompt_tokens": 1,
+                    }]
+                if self._call == 4 and len(self.submitted) >= 2:
+                    rid = "r-1"
+                    return [{
+                        "request_id": rid,
+                        "text": "second",
+                        "finish_reason": "STOPPED",
+                        "finished": True,
+                        "output_tokens": 1,
+                        "prompt_tokens": 1,
+                    }]
+                # Unfinished outputs for all submitted requests.
+                return [
+                    {
+                        "request_id": f"r-{i}",
+                        "text": f"pending-{i}",
+                        "finish_reason": "",
+                        "finished": False,
+                        "output_tokens": 0,
+                        "prompt_tokens": 1,
+                    }
+                    for i in range(len(self.submitted))
+                ]
 
+        async def _run():
+            engine = StubEngine()
+            llm = AsyncLLM(engine)
+
+            async def _run_one(prompt):
+                return await llm.generate(prompt, max_new_tokens=5)
+
+            # Submit two requests sequentially.
+            r1 = await _run_one("first")
+            r2 = await _run_one("second")
+            return r1, r2
+
+        r1, r2 = asyncio.run(_run())
+        assert r1["text"] == "first"
+        assert r2["text"] == "second"

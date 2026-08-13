@@ -19,6 +19,7 @@ def main():
         vllm_config=cfg,
         executor_class=UniProcExecutor,
         tokenizer=tokenizer,
+        busy_loop=True,
     )
 
     run_server(engine, host="0.0.0.0", port=8000)
