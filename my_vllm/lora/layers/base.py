@@ -1,9 +1,8 @@
 """LoRA base layer — weight container + reset utilities.
 
-Mirrors vLLM V1 lora/layers/base.py.
+Mirrors vLLM V1 lora/layers/base.py:BaseLayerWithLoRA.
 
-vLLM's `BaseLayer` (and its `LoRAMapping` / `BaseLayerWithLoRA`
-subclasses) provide:
+vLLM's `BaseLayerWithLoRA` (an `nn.Module`) provides:
   - Per-adapter weight containers (one set of A/B matrices per
     `lora_int_id`).
   - `set_lora(id)` / `reset_lora(id)` methods that swap the active
@@ -13,10 +12,15 @@ subclasses) provide:
   - `reset_lora_weights(...)` for unloader-side cleanup.
 
 C144: minimal subset — `BaseLayer` with `set_lora` /
-`reset_lora` / `create_lora_weights` (returns a dict of
-parameters) / `get_lora_weights` (returns the current adapter's
-weights). Per-adapter weight storage is via a `dict[int,
-LoRAWeights]` keyed by `lora_int_id`.
+`reset_lora` / `create_lora_weights` (returns the A/B pair) /
+`get_lora_weights` (returns the current adapter's weights).
+Per-adapter weight storage is via a `dict[int, LoRAWeights]`
+keyed by `lora_int_id`.
+C147: `BaseLayer` now inherits from `nn.Module` (was a plain
+class in C144-C146). This is required so that
+`setattr(parent_module, "qkv_proj", ColumnParallelLinearLoRA(...))`
+works — PyTorch's `nn.Module.__setattr__` only accepts
+`nn.Module` instances as child replacements.
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+from torch import nn
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +59,7 @@ class LoRAWeights:
         )
 
 
-class BaseLayer:
+class BaseLayer(nn.Module):
     """Base for all LoRA-augmented layers.
 
     Mirrors vLLM V1 lora/layers/base.py:BaseLayerWithLoRA.
@@ -62,8 +67,11 @@ class BaseLayer:
     C144: minimal — the active adapter is stored as an integer
     in `self.lora_id_to_loaded_id`. Per-adapter weights live in
     `self._adapters: dict[int, LoRAWeights]` keyed by
-    `lora_int_id`. Subclasses override `apply_lora` / `apply_base`
-    to do the actual forward.
+    `lora_int_id`. Subclasses override `apply_lora` /
+    `_base_weight_for_lora` to do the actual forward.
+    C147: inherits from `nn.Module` so `LoRAModelManager
+    .create_lora_modules()` can `setattr(parent, "name",
+    wrapper)` to swap the base Linear for the wrapper.
 
     Lifecycle:
       1. `create_lora_weights(lora_int_id, rank, in_features,
@@ -81,6 +89,11 @@ class BaseLayer:
         max_loras: int = 1,
         max_lora_rank: int = 16,
     ):
+        super().__init__()
+        # `nn.Module.__setattr__` auto-registers `base_layer` as
+        # a child module when it's an `nn.Module` (e.g.
+        # `ColumnParallelLinear`). It also removes it from any
+        # previous parent's `_modules` dict.
         self.base_layer = base_layer
         self.max_loras = max_loras
         self.max_lora_rank = max_lora_rank

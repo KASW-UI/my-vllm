@@ -89,19 +89,28 @@ class BaseLinearLayer(BaseLayer):
         """
         return self.base_layer.weight
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor):
         """Compute `y = base_linear(x) + scale * (x @ A^T) @ B^T`.
 
-        C144: minimal — calls the host `base_layer.forward(x)`,
-        then adds the LoRA delta via `apply_lora`. For my-vllm's
-        default (single adapter) `set_lora(id)` is called by the
-        runner before each batch.
+        C147: handle the `(output, output_bias)` tuple return from
+        vLLM-shaped ColumnParallel / RowParallel layers (used
+        by my-vllm's OPTForCausalLM's `qkv_proj, fc1, fc2,
+        out_proj`). The LoRA delta is added in-place to the
+        output tensor; the bias is returned unchanged.
+
+        Returns:
+          - `Tensor` if the host layer's `return_bias=False`.
+          - `(output, output_bias)` tuple if `return_bias=True`.
+            The OPT decoder code uses `out, _ = layer(x)` to
+            discard the bias; LoRA wraps the returned output
+            while preserving the tuple shape.
         """
         out = self.base_layer(x)
+        if isinstance(out, tuple):
+            output, output_bias = out
+            output = self.apply_lora(output, x)
+            return output, output_bias
         return self.apply_lora(out, x)
-
-    def __call__(self, x: torch.Tensor) -> torch.Tensor:
-        return self.forward(x)
 
 
 __all__ = ["BaseLinearLayer"]

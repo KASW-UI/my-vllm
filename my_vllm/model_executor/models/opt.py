@@ -8,8 +8,10 @@ file so the file is a faithful structural subset.
 Engineering details skipped (principled scope reduction):
 - SupportsPP (PP group, IntermediateTensors, make_layers): PP=1 by config; the
   make_empty_intermediate_tensors factory is preserved for forward-compat.
-- SupportsLoRA: lora/scheduler_hook.py lives in the lora/ package; not woven
-  into the model definition.
+- SupportsLoRA: declared via class-level metadata (supports_lora=True,
+  embedding_modules, lora_target_modules). The actual layer wrapping
+  happens in `LoRAModelManager.create_lora_modules()` (lora package)
+  which `LoRAModelRunnerMixin.update_lora_modules()` triggers.
 - AutoWeightsLoader: replaced by a manual fusion helper (QKV only — see
   _fuse_qkv_params below). AutoWeightsLoader's auto-mapping machinery
   (WeightsMapper with orig_to_new_stacked / orig_to_new_prefix) is out of
@@ -23,6 +25,7 @@ Field-level alignment verified against vLLM OPTForCausalLM:
 """
 
 from collections.abc import Iterable
+from typing import ClassVar
 
 import torch
 from torch import nn
@@ -313,10 +316,14 @@ class OPTForCausalLM(nn.Module):
     Class-level metadata matches vllm:
       hf_to_vllm_mapper:  stacked q/k/v → qkv_proj + decoder. → model.decoder.
       packed_modules_mapping:  qkv_proj ← [q_proj, k_proj, v_proj]
+      supports_lora:         True (LoRA-capable)
+      embedding_modules:     embed_tokens → vocab_embedding (HF naming)
+      lora_target_modules:   suffixes eligible for LoRA wrapping
+                             ({qkv_proj, out_proj, fc1, fc2})
 
-    SupportsPP / SupportsLoRA inheritance omitted (PP=1 by config; LoRA lives
-    in lora/ package — not woven into the model). See vllm version for the
-    full multi-inheritance signature.
+    SupportsPP inheritance omitted (PP=1 by config). SupportsLoRA is
+    declared as class-level metadata (mirrors vllm SupportsLoRA Protocol);
+    the wrapping itself happens in `lora/model_manager.py`.
     """
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -332,6 +339,25 @@ class OPTForCausalLM(nn.Module):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
     }
+
+    # ── LoRA support (C147) ──────────────────────────────────────────
+    supports_lora: ClassVar[bool] = True
+    """Marks this model as LoRA-capable (mirrors vllm SupportsLoRA)."""
+
+    embedding_modules: ClassVar[dict[str, str]] = {
+        "embed_tokens": "vocab_embedding",
+    }
+    """Module-name → HF vocab-embedding-name mapping (mirrors vllm OPT)."""
+
+    lora_target_modules: ClassVar[set[str]] = {
+        "qkv_proj", "out_proj", "fc1", "fc2",
+    }
+    """Linear-layer suffixes eligible for LoRA wrapping. Covers all 4
+    parallel-linear layers per decoder block (attention QKV/output,
+    MLP gate/down). The wrapping logic in
+    `lora.model_manager.LoRAModelManager.create_lora_modules` walks
+    `named_modules()` and replaces any module whose last name
+    component is in this set with the matching LoRA wrapper."""
 
     def __init__(self, config: OPTConfig, prefix: str = ""):
         super().__init__()

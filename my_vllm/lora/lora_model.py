@@ -61,7 +61,18 @@ class LoRAModel:
         self.lora_modules[base_module_name] = lora_module
 
     def add_lora(self, lora_request: LoRARequest) -> None:
-        """Register an adapter (id → LoRARequest)."""
+        """Register an adapter (id → LoRARequest).
+
+        For every already-wrapped `BaseLinearLayer` in
+        `self.lora_modules`, also allocate the per-adapter A/B
+        weight tensors via `create_lora_weights(...)`. This is
+        what makes subsequent `set_lora(id)` succeed (each
+        wrapper checks `lora_int_id in self._adapters`).
+
+        C147: real implementation (C146 only stored the
+        request; the wrappers' `_adapters` dict stayed empty,
+        so `set_lora` would raise `KeyError`).
+        """
         if lora_request.lora_int_id in self._adapters:
             logger.info(
                 "LoRA adapter %d (%s) already registered",
@@ -74,6 +85,28 @@ class LoRAModel:
                 f"adapter {lora_request.lora_int_id}"
             )
         self._adapters[lora_request.lora_int_id] = lora_request
+
+        # Allocate per-wrapper A/B tensors so `set_lora` succeeds.
+        for wrapper in self.lora_modules.values():
+            base = wrapper.base_layer
+            if base is None:
+                continue
+            in_features = getattr(base, "input_size", None)
+            out_features = getattr(base, "output_size", None)
+            if in_features is None or out_features is None:
+                logger.debug(
+                    "LoRA: skipping weight alloc for %s; cannot "
+                    "infer in/out features",
+                    type(base).__name__,
+                )
+                continue
+            wrapper.create_lora_weights(
+                lora_int_id=lora_request.lora_int_id,
+                rank=self.max_lora_rank,
+                in_features=in_features,
+                out_features=out_features,
+                alpha=1.0,
+            )
 
     def remove_lora(self, lora_int_id: int) -> None:
         """Drop an adapter and its per-module weights."""
