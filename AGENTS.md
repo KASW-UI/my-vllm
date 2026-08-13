@@ -23,9 +23,9 @@ Every file in `my_vllm/` must correspond to a real file in `vllm/`. No invented 
 
 **Previous history**: Stages C000→C098 were implemented under a prior "educational simulation" model. That history is preserved (never squash/rebase). The project now enters a new phase of **engineering alignment** (C110+) — see `Engineer-Spec/README.md` for the full specification.
 
-**Current status**: C125. `EngineCoreClient` abstraction in place (`InprocClient` for caller-driven offline, `BusyLoopClient` daemon thread for server/async); `LLMEngine` still holds `EngineCore` directly and is rewired at C126 per `LOOP-PLAN.md`.
+**Current status**: C126. `LLMEngine` rewired to hold an `EngineCoreClient` (default `InprocClient`, `busy_loop=True` → `BusyLoopClient`); pure refactor, `python run.py` output byte-identical to C125; `AsyncLLM` / `api_server` still naive — C127 will switch them to `BusyLoopClient` per `LOOP-PLAN.md`.
 
-**Next**: C126 — refactor `LLMEngine` to hold `EngineCoreClient` (pure refactor, behavior unchanged); C127 rewires `AsyncLLM` + `api_server` to `BusyLoopClient`; C128 closes the loop with verification + docs.
+**Next**: C127 — `AsyncLLM` deletes its naive `run_loop` and goes through `LLMEngine(busy_loop=True)`; `api_server` constructs `LLMEngine(busy_loop=True)`; C128 closes the loop with verification + docs.
 
 ## Commands
 
@@ -147,7 +147,8 @@ See `Engineer-Spec/README.md` § Model loading — init/load separation, meta de
 ## Key architecture facts
 
 - EngineCore `step()` = `schedule() → execute_model() → update_from_output()` → EngineCoreOutputs
-- LLMEngine `step()` = EngineCore.step() → EngineCoreOutputs → OutputProcessor.process_outputs()
+- EngineCore `run_busy_loop()` = `while _handle_shutdown(): _process_input_queue() → _process_engine_step() → output_queue.put_nowait()` (C124); inputs come via `input_queue: queue.Queue[tuple[EngineCoreRequestType, Any]]` with `{ADD, ABORT, WAKEUP}`; shutdown state machine `EngineShutdownState = {RUNNING, REQUESTED, SHUTTING_DOWN}`
+- LLMEngine `step()` = `EngineCoreClient.get_output() → EngineCoreOutputs → OutputProcessor.process_outputs()`; LLMEngine holds an `EngineCoreClient` (`busy_loop=False` → `InprocClient` direct-step, `busy_loop=True` → `BusyLoopClient` daemon thread); `running_requests()` accessor replaces direct `scheduler.running` access
 - SchedulerInterface ABC: schedule() → SchedulerOutput, update_from_output(), finish_requests()
 - Model loading chain: `Executor._init_executor() → Worker.init_device() → GPUModelRunner.load_model()`
 - KV cache is physical-block-based (BlockPool + FreeKVCacheBlockQueue, doubly-linked, O(1) alloc)

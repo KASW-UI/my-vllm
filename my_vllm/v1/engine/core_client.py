@@ -99,6 +99,17 @@ class EngineCoreClient(ABC):
         """
         return False
 
+    def running_requests(self) -> list[Request]:
+        """Snapshot of currently-running Request objects.
+
+        Used by ``LLMEngine.step()`` to build the ``req_id → Request``
+        map handed to ``OutputProcessor.process_outputs``. The default
+        returns an empty list (clients that don't expose EngineCore
+        state directly); ``InprocClient`` / ``BusyLoopClient`` override
+        with a live view of ``scheduler.running``.
+        """
+        return []
+
 
 class InprocClient(EngineCoreClient):
     """In-process EngineCoreClient — caller-driven step loop.
@@ -134,6 +145,9 @@ class InprocClient(EngineCoreClient):
 
     def has_work(self) -> bool:
         return self.engine_core.has_work()
+
+    def running_requests(self) -> list[Request]:
+        return self.engine_core.scheduler.running
 
     def shutdown(self, timeout: float | None = None) -> None:
         self.engine_core.shutdown()
@@ -183,6 +197,9 @@ class BusyLoopClient(EngineCoreClient):
 
     def has_work(self) -> bool:
         return self.engine_core.has_work()
+
+    def running_requests(self) -> list[Request]:
+        return self.engine_core.scheduler.running
 
     def shutdown(self, timeout: float | None = None) -> None:
         # Transition REQUESTED + WAKEUP sentinel (see EngineCore.shutdown).

@@ -4,20 +4,25 @@ C015: migrated from engine/llm_engine.py.
 C025: uses OutputProcessor for token→text; receives structured
 RequestOutput from EngineCore.step().
 C026: InputProcessor handles prompt → tokenize → Request.
+C126: LLMEngine holds an EngineCoreClient (InprocClient / BusyLoopClient)
+instead of an EngineCore directly. Default ``busy_loop=False`` keeps the
+caller-driven semantics of run.py / LLMEngine.generate(). AsyncLLM /
+api_server rewire to BusyLoopClient at C127.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from my_vllm.v1.engine.core import EngineCore
+from my_vllm.v1.engine.core_client import EngineCoreClient
 from my_vllm.v1.engine.input_processor import InputProcessor
-from my_vllm.v1.engine.output_processor import OutputProcessor, RequestOutput
-from my_vllm.v1.executor.abstract import Executor
+from my_vllm.v1.engine.output_processor import OutputProcessor
 from my_vllm.v1.request import Request
 
 if TYPE_CHECKING:
     from my_vllm.config.vllm import VllmConfig
+    from my_vllm.v1.engine.core_client import EngineCoreClient
+    from my_vllm.v1.executor.abstract import Executor
 
 
 class LLMEngine:
@@ -26,8 +31,10 @@ class LLMEngine:
     Mirrors vLLM V1 v1/engine/llm_engine.py:48 (simplified).
 
     Receives VllmConfig + executor_class + tokenizer.
-    Owns EngineCore + OutputProcessor internally.
-    step() flow: EngineCore.step() → EngineCoreOutputs → OutputProcessor.process_outputs() → list[RequestOutput]
+    Owns an ``EngineCoreClient`` (InprocClient or BusyLoopClient, chosen
+    by ``busy_loop``) + OutputProcessor internally.
+    step() flow: ``engine_core.get_output()`` → EngineCoreOutputs →
+    OutputProcessor.process_outputs() → list[RequestOutput].
     """
 
     def __init__(
@@ -35,9 +42,11 @@ class LLMEngine:
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         tokenizer,
+        busy_loop: bool = False,
     ):
         self._tokenizer = tokenizer
-        self._engine_core = EngineCore(
+        self.engine_core: EngineCoreClient = EngineCoreClient.make_client(
+            busy_loop=busy_loop,
             vllm_config=vllm_config,
             executor_class=executor_class,
             log_stats=False,
@@ -57,17 +66,17 @@ class LLMEngine:
     ) -> str:
         req = self._input_processor.process(prompt, max_new_tokens)
         self._pending[req.request_id] = req
-        self._engine_core.add_request(req)
+        self.engine_core.add_request(req)
         return req.request_id
 
     def step(self) -> list[dict]:
         """Run one scheduling + execution step and return finished outputs."""
         results: list[dict] = []
-        engine_core_outputs = self._engine_core.step()
+        engine_core_outputs = self.engine_core.get_output()
 
         req_map = {
             r.request_id: r
-            for r in self._engine_core.scheduler.running
+            for r in self.engine_core.running_requests()
         }
 
         outputs = self._output_processor.process_outputs(
@@ -98,7 +107,7 @@ class LLMEngine:
         return results
 
     def has_work(self) -> bool:
-        return self._engine_core.has_work()
+        return self.engine_core.has_work()
 
     def generate(
         self,
