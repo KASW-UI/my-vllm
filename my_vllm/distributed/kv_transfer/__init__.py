@@ -9,7 +9,7 @@ Real vLLM provides multiple backends:
   - OffloadingConnector — CPU/disk swap
   - SimpleCPUOffloadConnector — naive CPU offload
 
-Each backend implements KVConnectorBase_V1 (see v1/core/kv_connector.py)
+Each backend implements KVConnectorBase_V1 (see kv_connector/v1/base.py)
 with scheduler-side + worker-side interfaces.
 """
 

@@ -33,7 +33,7 @@ import torch
 from my_vllm.v1.core.block_pool import BlockPool
 from my_vllm.v1.core.kv_cache_manager import KVCacheManager
 from my_vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from my_vllm.v1.core.kv_connector import TransferBundle
+from my_vllm.distributed.kv_transfer.kv_connector.v1 import TransferBundle
 from my_vllm.v1.core.sched.scheduler import Scheduler
 from my_vllm.v1.engine import EngineCoreOutputs, EngineCoreRequestType
 from my_vllm.v1.executor.abstract import Executor
@@ -49,7 +49,7 @@ from my_vllm.v1.request import Request, RequestStatus
 if TYPE_CHECKING:
     from my_vllm.config.kv_transfer import KVTransferConfig
     from my_vllm.config.vllm import VllmConfig
-    from my_vllm.v1.core.kv_connector import KVConnectorBase_V1
+    from my_vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
 
 logger = logging.getLogger(__name__)
 
@@ -425,8 +425,12 @@ class EngineCore:
         Uses NoopConnector as default when no real connector is configured.
         Aligns with vLLM KVConnectorFactory.create_connector().
         """
-        from my_vllm.v1.core.kv_connector import NoopConnector
-        self.kv_connector = NoopConnector()
+        from my_vllm.distributed.kv_transfer.kv_connector.v1 import (
+            KVConnectorRole, NoopConnector,
+        )
+        self.kv_connector = NoopConnector(
+            self.vllm_config, KVConnectorRole.SCHEDULER,
+        )
 
     def _producer_transfer_loop(self, outputs: EngineCoreOutputs) -> None:
         """P side: transfer finished prefill requests to consumer.

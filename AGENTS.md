@@ -61,12 +61,12 @@ There is no CI, no lint, no formatter, no typecheck configured.
 ```
 my_vllm/
   config/              # → vllm/config/  VllmConfig, ModelConfig, CacheConfig, SchedulerConfig, ParallelConfig
-  distributed/         # → vllm/distributed/  parallel_state.py (GroupCoordinator), elastic_ep/
+  distributed/         # → vllm/distributed/  parallel_state.py (GroupCoordinator), kv_transfer/ (KVConnectorBase_V1, factory, nixl), elastic_ep/
   model_executor/      # → vllm/model_executor/  model_loader, layers/linear, layers/fused_moe, models/opt
   v1/                  # → vllm/v1/
     engine/            # EngineCore, EngineCoreClient (InprocClient / BusyLoopClient), LLMEngine,
                       # AsyncLLM, InputProcessor, OutputProcessor, detokenizer, exceptions
-    core/              # BlockPool, KVCacheManager, kv_cache_utils, kv_cache_metrics, kv_connector
+    core/              # BlockPool, KVCacheManager, kv_cache_utils, kv_cache_metrics
       sched/           # Scheduler, SchedulerInterface, SchedulerOutput, request_queue
     worker/            # WorkerBase, Worker, GPUModelRunner
       gpu/             # BlockTables, InputBatch, RequestState, PPHandler, model_states/

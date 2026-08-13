@@ -16,8 +16,9 @@ from typing import Any
 
 import torch
 
-from my_vllm.v1.core.kv_connector import (
+from my_vllm.distributed.kv_transfer.kv_connector.v1 import (
     KVConnectorBase_V1,
+    KVConnectorRole,
     RecvResult,
     TransferBundle,
     TransferStatus,
@@ -37,15 +38,27 @@ class NixlConnector(KVConnectorBase_V1):
     Architecture:
       Producer (Prefill):  save_kv_layer() → buffer → wait_for_save()
       Consumer (Decode):   start_load_kv() → poll for bundles → decode
+
+    C133: constructor signature aligned with vLLM's
+    KVConnectorBase_V1 (vllm_config, role, kv_cache_config). Layer
+    count + buffer size are still configurable via the role-specific
+    attribute accessors (see `_local_buffer_size`).
     """
+
+    _DEFAULT_NUM_LAYERS = 12
+    _DEFAULT_BUFFER_SIZE = 1024 * 1024 * 100  # 100MB per layer
 
     def __init__(
         self,
-        num_layers: int = 12,
-        buffer_size: int = 1024 * 1024 * 100,  # 100MB per layer
+        vllm_config,
+        role: KVConnectorRole,
+        kv_cache_config=None,
+        num_layers: int | None = None,
+        buffer_size: int | None = None,
     ):
-        self._num_layers = num_layers
-        self._buffer_size = buffer_size
+        super().__init__(vllm_config, role, kv_cache_config)
+        self._num_layers = num_layers or self._DEFAULT_NUM_LAYERS
+        self._buffer_size = buffer_size or self._DEFAULT_BUFFER_SIZE
 
         # Per-layer KV buffers: {layer_name: torch.Tensor}
         self._kv_buffers: dict[str, torch.Tensor] = {}
