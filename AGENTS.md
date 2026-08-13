@@ -23,9 +23,9 @@ Every file in `my_vllm/` must correspond to a real file in `vllm/`. No invented 
 
 **Previous history**: Stages C000→C098 were implemented under a prior "educational simulation" model. That history is preserved (never squash/rebase). The project now enters a new phase of **engineering alignment** (C110+) — see `Prompt/Engineer-Spec/README.md` for the full specification.
 
-**Current status**: C151. All alignment phases + LoRA专项 complete (55/55 items closed); follow-up wire-ups 4/4 done; cleanup phase A (out-of-JD scope) closed. KV cache hierarchy mirrors vLLM (Manager → Coordinator → SingleTypeKVCacheManager → FullAttentionManager). KV transfer migrated to vLLM-canonical `distributed/.../v1/base.py` with `KVConnectorFactory` + `ExampleConnector`. Scheduler has 3-level pipeline + utils + AsyncScheduler skeleton. FP8 KV cache end-to-end: `kv_cache_dtype=fp8_e4m3` allocates the cache in `float8_e4m3fn`, `reshape_and_cache_flash` takes the FP8 path with per-tensor K/V scales (C149). Multi-process NCCL end-to-end: `init_distributed_environment` + canonical `Worker.init_device` sequence + `MultiprocExecutor._init_executor` exports `MASTER_ADDR`/`MASTER_PORT`/`WORLD_SIZE` env vars (C150). LoRA Dense-Linear forward path end-to-end runnable. `update_lora_modules()` wraps OPTForCausalLM targets (C147). `GPUModelRunner` inherits `LoRAModelRunnerMixin` and `_set_active_lora()` activates the per-step adapter inside `execute_model` (C148). Out-of-JD scope pruned (C151): Ray executor / Ray utils / OpenAI api_server / `examples/server.py` / `deploy/` (K8s + autoscaling) deleted; `my_vllm/` no longer references any of these. spec_decode / parallel_sampling / logprobs skeletons exist (stage B 欠账待决策). Invented-file count: 0. See `docs/snapshots/C151.md` for closure write-up.
+**Current status**: C151. All alignment phases + LoRA专项 complete (55/55 items closed); follow-up wire-ups 4/4 done; cleanup phase A (out-of-JD scope) closed. KV cache hierarchy mirrors vLLM (Manager → Coordinator → SingleTypeKVCacheManager → FullAttentionManager). KV transfer migrated to vLLM-canonical `distributed/.../v1/base.py` with `KVConnectorFactory` + `ExampleConnector`. Scheduler has 3-level pipeline + utils + AsyncScheduler skeleton. FP8 KV cache end-to-end: `kv_cache_dtype=fp8_e4m3` allocates the cache in `float8_e4m3fn`, `reshape_and_cache_flash` takes the FP8 path with per-tensor K/V scales (C149). Multi-process NCCL end-to-end: `init_distributed_environment` + canonical `Worker.init_device` sequence + `MultiprocExecutor._init_executor` exports `MASTER_ADDR`/`MASTER_PORT`/`WORLD_SIZE` env vars (C150). LoRA Dense-Linear forward path end-to-end runnable. `update_lora_modules()` wraps OPTForCausalLM targets (C147). `GPUModelRunner` inherits `LoRAModelRunnerMixin` and `_set_active_lora()` activates the per-step adapter inside `execute_model` (C148). Out-of-JD scope pruned (C151): Ray executor / Ray utils / OpenAI api_server / `examples/server.py` / `deploy/` (K8s + autoscaling) deleted; `my_vllm/` no longer references any of these. Invented-file count: 0. See `docs/snapshots/C151.md` for closure write-up.
 
-**Next**: 阶段 B 欠账（per `docs/cleanup-plan.md` §3）— spec_decode（Must-implement）/ elastic_ep / rotary_embedding 走哪条路需用户决策。完成后 production-side concerns（monitor / entrypoints business surface / PD 分离端到端验证）。
+**Next**: K8s 部署计划（C152-C158，7 个 commit）— 见 `k8s-deploy-plan.md`。决策：解耦先行（C157 K8s 侧先 put，my_vllm `VLLM_ROLE` env 解析入 PD 分离计划），真部署（kind + 本地 docker，本地镜像投放；无 GPU 节点时降级 CPU 模式验证 deploy 编排）。完成后接 阶段 B 欠账（per `docs/cleanup-plan.md` §3）— spec_decode（Must-implement）/ elastic_ep / rotary_embedding 走哪条路需用户决策；最后 production-side concerns（monitor / entrypoints business surface / PD 分离端到端验证）。
 
 ## Scope decision (JD-driven)
 
@@ -61,52 +61,50 @@ There is no CI, no lint, no formatter, no typecheck configured.
 ```
 my_vllm/
   config/              # → vllm/config/  VllmConfig, ModelConfig, CacheConfig, SchedulerConfig, ParallelConfig
-<<<<<<< Updated upstream
-  distributed/         # → vllm/distributed/  parallel_state.py (GroupCoordinator), kv_transfer/ (KVConnectorBase_V1, factory, nixl), elastic_ep/
-  model_executor/      # → vllm/model_executor/  model_loader, layers/linear, layers/fused_moe, models/opt
-=======
-  distributed/         # → vllm/distributed/  parallel_state.py (GroupCoordinator), elastic_ep/, kv_transfer/
+  distributed/         # → vllm/distributed/  parallel_state.py (GroupCoordinator)
+    elastic_ep/        # elastic_state.py (架构对齐，尚未接线，见 cleanup-plan §1.3 B2)
+    kv_transfer/       # KVConnectorBase_V1 / factory / example_connector / nixl
   model_executor/      # → vllm/model_executor/  model_loader, custom_op, layers/, models/
-    layers/            # linear (Column/Row/QKV), attention/attention.py, attention_layer_base.py,
-                       #   activation, layernorm, logits_processor, vocab_parallel_embedding, fused_moe/, quantization/
-    models/            # opt.py (Dense), llama.py (GQA), deepseek_v2.py (DeepSeek V2/V3 MoE+MLA)
-  platforms/           # → vllm/platforms/  Platform interface, attn backend selection
-  profiler/            # → vllm/profiler/  WorkerProfiler, TorchProfiler, CUDAGraphProfiler
-  lora/ envs/ logger/ utils/
-  forward_context.py   # → vllm/forward_context.py  metadata channel (attn_metadata/slot_mapping/layers)
-  entrypoints/         # → vllm/entrypoints/  llm.py, openai/api_server.py
->>>>>>> Stashed changes
+    layers/            # linear, activation, layernorm, logits_processor, vocab_parallel_embedding,
+                       #   attention/{attention.py, attention_layer_base.py}, fused_moe/, quantization/, rotary_embedding/
+    models/            # opt.py (Dense only — Llama/DeepSeek 在 alignment 后续阶段)
+  platforms/           # → vllm/platforms/  interface.py (CUDA 唯一)
+  profiler/            # → vllm/profiler/  wrapper.py, layerwise_profile.py
+  lora/                # → vllm/lora/  lora_model, model_manager, request, worker_manager, layers/, ops/
   v1/                  # → vllm/v1/
     engine/            # EngineCore, EngineCoreClient (InprocClient / BusyLoopClient), LLMEngine,
-                      # AsyncLLM, InputProcessor, OutputProcessor, detokenizer, exceptions
+                       # AsyncLLM, InputProcessor, OutputProcessor, detokenizer, exceptions
     core/              # BlockPool, KVCacheManager, kv_cache_utils, kv_cache_metrics
       sched/           # Scheduler, SchedulerInterface, SchedulerOutput, request_queue
     worker/            # WorkerBase, Worker, GPUModelRunner
       gpu/             # BlockTables, InputBatch, RequestState, PPHandler (pp_utils.py), model_states/
-    executor/          # Executor ABC, UniProcExecutor, MultiprocExecutor, RayDistributedExecutor, ray_utils
-<<<<<<< Updated upstream
-    attention/         # AttentionBackend ABC, CommonAttentionMetadata, selector, backends/flash_attn, ops/paged_attn, ops/triton_*
-=======
+    executor/          # Executor ABC, UniProcExecutor, MultiprocExecutor (C151 已删 Ray executor)
     attention/         # AttentionBackend ABC, CommonAttentionMetadata, selector (→ Triton),
-                       #   backends/triton_attn, backends/flash_attn (fallback),
-                       #   ops/triton_unified_attention, ops/triton_reshape_and_cache_flash, ops/triton_slot_mapping
->>>>>>> Stashed changes
+                       #   backends/{triton_attn, flash_attn}.py,
+                       #   ops/{triton_unified_attention, triton_reshape_and_cache_flash, paged_attn, triton_attention_helpers}.py
     sample/            # Sampler (nn.Module), LogitsProcessor, SamplingMetadata
     metrics/           # stats, loggers, prometheus
-    spec_decode/       # metadata (stub)
+    spec_decode/       # metadata (stub — 见 cleanup-plan §1.3 B1)
     engine/__init__.py # FinishReason, EngineCoreOutput, EngineCoreOutputs
     request.py         # Request (12 statuses), SamplingParams
     outputs.py         # SamplerOutput, ModelRunnerOutput
     serial_utils.py    # MsgpackEncoder/Decoder (binary format)
     utils.py           # ConstantList
     kv_cache_interface.py  # KVCacheSpec hierarchy
+  entrypoints/         # → vllm/entrypoints/  llm.py (C151 已删 OpenAI api_server)
   _custom_ops.py       # CUDA op dispatch (csrc/cache_kernels.cu → _C.reshape_and_cache)
 
 # Repo root (outside my_vllm/ package)
 run.py                 # CLI entry point
 csrc/                  # C++/CUDA sources (cache_kernels.cu, quantization/)
 setup.py               # build _C extension
-examples/              # run.py, benchmark.py, server.py
+examples/              # run.py, benchmark.py
+deploy/                # K8s 部署实验 (C152-C158, 独立于 my_vllm/，仅通过 HTTP/env/Prometheus 交互)
+  k8s/                 # namespace/configmap/deployment/statefulset/service/hpa/pdb/sa/kustomization
+  observability/       # ServiceMonitor + Prometheus rules + Grafana dashboard
+  autoscaling/         # 独立 scaler.py controller (HPA 不足场景)
+  disaggregated/       # PD 分离部署 (prefill + decode 两套 Deployment)
+k8s-deploy-plan.md     # C152-C158 执行计划 (新)
 LOOP-PLAN.md           # C124→C128 plan (busy loop + EngineCoreClient)
 ```
 
@@ -125,7 +123,7 @@ The **engineering spec** (`Prompt/Engineer-Spec/README.md`) defines the alignmen
 - **Must implement**: Speculative Decoding, EP, CP, KV Connector, at least one Quantization path — these alter GPU execution, KV Cache, batching, scheduler, communication, or model parallelism and cannot remain NoOp/ABC
 - **Keep (career-relevant)**: LoRA — one working Dense-Linear path
 - **Delete (no JD match)**: Mamba/SSM, Multimodal, Structured Output, multi-tenant, pooler/embedding/rerank, encoder-decoder, non-OPT models, non-CUDA platforms, non-FP8 quantization backends, entrypoints business surface — remove cleanly, no dangling imports
-- **Excluded from core code**: K8s, Ray, Autoscaling — understand theoretically, but not in `my_vllm/`; may exist as a separate `deployment/` experiment
+- **Excluded from core code**: K8s, Ray, Autoscaling — understand theoretically, but not in `my_vllm/`. **Exception**: K8s 部署计划已批准（`k8s-deploy-plan.md`）— `deploy/` 目录与 `my_vllm/` 平级，禁止 `import my_vllm.*`，仅通过 HTTP / env / Prometheus 交互；Ray 仍仅理论。
 
 ## 4-Level alignment framework
 
@@ -138,13 +136,8 @@ The **engineering spec** (`Prompt/Engineer-Spec/README.md`) defines the alignmen
 
 ## Before EVERY code modification:
 
-<<<<<<< Updated upstream
-1. Read `Engineer-Spec/README.md` for the target alignment standard
-2. Check `docs/alignment-plan.md` (keep/delete matrix + reference `vllm/...` path) and the Implementation scope tiers — confirm the feature is in P0/P1/Must Implement/Keep scope, not Delete or Excluded
-=======
 1. Read `Prompt/Engineer-Spec/README.md` for the target alignment standard
-2. Check the Implementation scope tiers — confirm the feature is in P0/P1/Must Implement scope, not Architecture-only or Excluded
->>>>>>> Stashed changes
+2. Check `docs/alignment-plan.md` (keep/delete matrix + reference `vllm/...` path) and the Implementation scope tiers — confirm the feature is in P0/P1/Must Implement/Keep scope, not Delete or Excluded
 3. Read the real vLLM source at `/home/kasw/文档/GitHub/GPU-Project/vllm` for API verification
 4. Confirm the file exists in real vLLM's file tree
 5. Match vLLM class names, method names, dataclass field names exactly
@@ -183,16 +176,12 @@ See `Prompt/Engineer-Spec/README.md` § Model loading — init/load separation, 
 
 - EngineCore `step()` = `schedule() → execute_model() → update_from_output()` → EngineCoreOutputs
 - EngineCore `run_busy_loop()` = `while _handle_shutdown(): _process_input_queue() → _process_engine_step() → output_queue.put_nowait()` (C124); inputs come via `input_queue: queue.Queue[tuple[EngineCoreRequestType, Any]]` with `{ADD, ABORT, WAKEUP}`; shutdown state machine `EngineShutdownState = {RUNNING, REQUESTED, SHUTTING_DOWN}`
-<<<<<<< Updated upstream
 - LLMEngine `step()` = `EngineCoreClient.get_output() → EngineCoreOutputs → OutputProcessor.process_outputs()`; LLMEngine holds an `EngineCoreClient` (`busy_loop=False` → `InprocClient` direct-step, `busy_loop=True` → `BusyLoopClient` daemon thread); `running_requests()` accessor replaces direct `scheduler.running` access
-=======
-- LLMEngine `step()` = EngineCore.step() → EngineCoreOutputs → OutputProcessor.process_outputs() (still caller-driven; EngineCoreClient wiring lands at C125)
->>>>>>> Stashed changes
 - SchedulerInterface ABC: schedule() → SchedulerOutput, update_from_output(), finish_requests()
 - Model loading chain: `Executor._init_executor() → Worker.init_device() → GPUModelRunner.load_model()`
 - Unified `execute_model`: `update_states → prepare_inputs → prepare_attn → set_forward_context → model.forward → sample → postprocess` (single batch, no prefill/decode split)
 - Model is vLLM-native `OPTForCausalLM` (custom layers), forward is `model(input_ids, positions)` — no HF `past_key_values`
-- Attention: `set_forward_context(attn_dict)` → `Attention` layer → `TritonAttentionBackend` (`triton_reshape_and_cache_flash` + `unified_attention` + `triton_slot_mapping`)
+- Attention: `set_forward_context(attn_dict)` → `Attention` layer → `TritonAttentionBackend` (`triton_reshape_and_cache_flash` + `triton_unified_attention` + `paged_attn` + `triton_attention_helpers`)
 - KV cache: HND-packed `(num_layers, num_blocks, num_kv_heads, block_size, 2*head_dim)`; block-major; BlockPool + FreeKVCacheBlockQueue O(1) alloc
 - CUDA graph: `capture_cudagraph()` captures decode graphs per batch size; `_run_with_cudagraph()` replays decode-only steps
 - Prefix caching: BlockHashToBlockMap (hash→list[block]), free_blocks() with ref_cnt cascading release, CoW
