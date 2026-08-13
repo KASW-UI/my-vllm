@@ -109,11 +109,13 @@ class GPUModelRunner:
         self.block_size = cc.block_size
         self.max_num_blocks = cc.num_kv_blocks
         self.device = device
+        self.enforce_eager: bool = mc.enforce_eager
 
         self.model = None
         self.num_layers: int = 0
         self.num_kv_heads: int = 0
         self.head_dim: int = 0
+        self.hidden_size: int = 0
         self.dtype: torch.dtype = _str_to_torch_dtype(mc.dtype)
         self.sampler = Sampler()
 
@@ -128,6 +130,12 @@ class GPUModelRunner:
         # HND-packed KV cache (5D) — see load_model() for layout.
         self.kv_cache: torch.Tensor | None = None
         self.attn_metadata: CommonAttentionMetadata | None = None
+
+        # CUDA graph capture state — populated by capture_cudagraph().
+        self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
+        self.graph_bs: list[int] = []
+        self.graph_pool: torch.cuda.CUDAGraph | None = None
+        self.graph_vars: dict[str, torch.Tensor] | None = None
 
         self._max_num_reqs = sc.max_num_seqs
         self._max_num_batched_tokens = sc.max_num_batched_tokens
@@ -147,6 +155,7 @@ class GPUModelRunner:
         self.num_layers = config.num_hidden_layers
         self.num_kv_heads = config.num_attention_heads
         self.head_dim = config.hidden_size // config.num_attention_heads
+        self.hidden_size = config.hidden_size
 
         self.request_state = RequestState(
             max_num_reqs=self._max_num_reqs,
@@ -176,9 +185,122 @@ class GPUModelRunner:
 
         self._bind_kv_caches()
 
+        if not self.enforce_eager:
+            self.capture_cudagraph()
+
     def _bind_kv_caches(self) -> None:
         for i, layer in enumerate(self.model.model.decoder.layers):
             layer.self_attn.attn.bind_kv_cache(self.kv_cache[i])
+
+    # ── CUDA graph capture (nano-vllm style; mirrors vllm cudagraph_utils) ─
+
+    @torch.inference_mode()
+    def capture_cudagraph(self) -> None:
+        """Capture CUDA graphs for decode batches of varying sizes.
+
+        Mirrors nano-vllm model_runner.capture_cudagraph and vllm
+        v1/worker/gpu/cudagraph_utils.py:cudagraph_capture. Captures one
+        graph per batch size in [1, 2, 4, 8, 16, 32, ..., max_bs], sharing
+        a CUDA graph pool across sizes. Decode steps whose bs ≤ max_bs
+        can replay the closest captured graph and copy inputs into the
+        pinned graph_vars buffers.
+        """
+        max_bs = min(self._max_num_reqs, 512)
+        max_num_blocks = (
+            (self._max_model_len + self.block_size - 1) // self.block_size
+        )
+
+        # Pre-allocate pinned input buffers — addresses stay constant across
+        # replays so the captured graph's device pointers remain valid.
+        graph_input_ids = torch.zeros(max_bs, dtype=torch.int64, device=self.device)
+        graph_positions = torch.zeros(max_bs, dtype=torch.int64, device=self.device)
+        graph_slot_mapping = torch.zeros(max_bs, dtype=torch.int64, device=self.device)
+        graph_seq_lens = torch.zeros(max_bs, dtype=torch.int32, device=self.device)
+        graph_block_tables = torch.zeros(
+            max_bs, max_num_blocks, dtype=torch.int32, device=self.device,
+        )
+        graph_query_start_loc = torch.zeros(
+            max_bs + 1, dtype=torch.int32, device=self.device,
+        )
+        graph_outputs = torch.zeros(
+            max_bs, self.hidden_size, dtype=self.dtype, device=self.device,
+        )
+
+        # graph_bs ladder: nano-vllm pattern.
+        self.graph_bs = [1, 2, 4, 8] + list(range(16, max_bs + 1, 16))
+        self.graphs = {}
+        self.graph_pool = None
+
+        # Build a CommonAttentionMetadata template for decode at each bs.
+        # causal=False (no causal mask for single-token decode queries),
+        # positions=[0] * bs (the model treats positions as the seq-len
+        # offset rather than relying on it for prefill masking).
+        causal_template = False
+        for bs in reversed(self.graph_bs):
+            graph = torch.cuda.CUDAGraph()
+            # Populate graph_vars so the captured forward sees realistic data.
+            graph_input_ids[:bs].fill_(0)
+            graph_positions[:bs].fill_(0)
+            graph_slot_mapping.fill_(-1)
+            graph_seq_lens.fill_(1)
+            graph_block_tables[:bs].fill_(0)
+            graph_query_start_loc[: bs + 1].fill_(0)
+            graph_query_start_loc[1 : bs + 1] = torch.arange(
+                1, bs + 1, dtype=torch.int32, device=self.device,
+            )
+
+            attn_metadata = CommonAttentionMetadata(
+                query_start_loc=graph_query_start_loc[: bs + 1],
+                query_start_loc_cpu=graph_query_start_loc[: bs + 1].cpu(),
+                seq_lens=graph_seq_lens[:bs],
+                seq_lens_cpu=graph_seq_lens[:bs].cpu(),
+                num_reqs=bs,
+                num_actual_tokens=bs,
+                max_query_len=1,
+                max_seq_len=1,
+                block_table_tensor=graph_block_tables[:bs],
+                slot_mapping=graph_slot_mapping[:bs],
+                positions=graph_positions[:bs],
+                causal=causal_template,
+            )
+            attn_dict = {
+                layer.self_attn.attn.layer_name: attn_metadata
+                for layer in self.model.model.decoder.layers
+            }
+
+            # Warmup before capture (CUDA graphs need kernels to be JIT-cached).
+            with set_forward_context(attn_dict):
+                graph_outputs[:bs] = self.model(
+                    graph_input_ids[:bs], graph_positions[:bs],
+                )
+            torch.cuda.synchronize()
+
+            with set_forward_context(attn_dict):
+                with torch.cuda.graph(graph, self.graph_pool):
+                    graph_outputs[:bs] = self.model(
+                        graph_input_ids[:bs], graph_positions[:bs],
+                    )
+            if self.graph_pool is None:
+                self.graph_pool = graph.pool()
+            self.graphs[bs] = graph
+            torch.cuda.synchronize()
+
+        self.graph_vars = {
+            "input_ids": graph_input_ids,
+            "positions": graph_positions,
+            "slot_mapping": graph_slot_mapping,
+            "seq_lens": graph_seq_lens,
+            "block_tables": graph_block_tables,
+            "query_start_loc": graph_query_start_loc,
+            "outputs": graph_outputs,
+        }
+
+    def _next_graph_bs(self, bs: int) -> int:
+        """Smallest captured bs >= bs (nano-vllm pattern)."""
+        for s in self.graph_bs:
+            if s >= bs:
+                return s
+        return self.graph_bs[-1]
 
     # ── execute_model: the V1 hot path ──────────────────────────────────
 
@@ -191,6 +313,9 @@ class GPUModelRunner:
         Pipeline:
             update_states → prepare_inputs → prepare_attn →
             set_forward_context → model.forward → sample → postprocess.
+
+        Decode-only steps (no new reqs, all bs <= max captured) replay
+        a captured CUDA graph when enforce_eager is False.
         """
         if scheduler_output.total_num_scheduled_tokens == 0:
             return ModelRunnerOutput(
@@ -204,13 +329,25 @@ class GPUModelRunner:
         self._update_states(scheduler_output)
 
         input_batch = self._prepare_inputs(scheduler_output)
-        attn_metadata = self._prepare_attn(input_batch)
-        attn_dict = self._build_attn_metadata_dict(attn_metadata)
 
-        with set_forward_context(attn_dict):
-            hidden_states = self.model(
-                input_batch.input_ids, input_batch.positions,
-            )
+        can_use_graph = (
+            not self.enforce_eager
+            and self.graph_vars is not None
+            and not scheduler_output.scheduled_new_reqs
+            and input_batch.num_reqs <= self._max_num_reqs
+            and (input_batch.query_start_loc[1:] - input_batch.query_start_loc[:-1]).max().item() == 1
+        )
+
+        if can_use_graph:
+            hidden_states = self._run_with_cudagraph(input_batch)
+            attn_metadata = self._prepare_attn(input_batch)
+        else:
+            attn_metadata = self._prepare_attn(input_batch)
+            attn_dict = self._build_attn_metadata_dict(attn_metadata)
+            with set_forward_context(attn_dict):
+                hidden_states = self.model(
+                    input_batch.input_ids, input_batch.positions,
+                )
 
         sampled = self._sample(hidden_states, input_batch)
         self._postprocess(sampled, input_batch)
@@ -220,6 +357,38 @@ class GPUModelRunner:
         self._step_ms = start_event.elapsed_time(end_event)
 
         return self._build_model_runner_output(sampled, input_batch)
+
+    def _run_with_cudagraph(
+        self, input_batch: InputBatch,
+    ) -> torch.Tensor:
+        """Replay the closest captured CUDA graph for a decode batch.
+
+        Mirrors nano-vllm run_model() — copies live input_batch tensors
+        into pinned graph_vars buffers, replays the captured graph, and
+        returns the per-request hidden_states slice.
+        """
+        bs = input_batch.num_reqs
+        graph_bs = self._next_graph_bs(bs)
+        graph = self.graphs[graph_bs]
+        gv = self.graph_vars
+
+        gv["input_ids"][:bs] = input_batch.input_ids
+        gv["positions"][:bs] = input_batch.positions
+        gv["slot_mapping"].fill_(-1)
+        gv["slot_mapping"][:bs] = input_batch.slot_mapping
+        gv["seq_lens"].fill_(0)
+        gv["seq_lens"][:bs] = input_batch.seq_lens
+        bt_live = input_batch.block_table
+        bt_width = bt_live.shape[1]
+        gv["block_tables"][:bs, :bt_width] = bt_live
+        # qsl: row i has start=i, end=i+1 for decode (single token per req).
+        gv["query_start_loc"][: bs + 1].fill_(0)
+        gv["query_start_loc"][1 : bs + 1] = torch.arange(
+            1, bs + 1, dtype=torch.int32, device=self.device,
+        )
+
+        graph.replay()
+        return gv["outputs"][:bs]
 
     # ── State update (mirrors vLLM add_requests / update_requests) ──────
 
