@@ -4,6 +4,11 @@ Custom ops interface — wraps PyTorch custom C++/CUDA extensions (torch.ops._C)
 In real vLLM this dispatches to compiled C++/CUDA kernels via torch.library.
 Here we provide the Python-level interface with PyTorch fallbacks,
 matching the architecture and function signatures of real vLLM.
+
+The compiled CUDA extension lives at ``my_vllm._C`` (see setup.py →
+csrc/cache_kernels.cu).  When the extension is not built (e.g. CPU-only
+test environments) the wrappers fall back to a small Python
+implementation so callers can still proceed.
 """
 
 from enum import IntEnum
@@ -12,6 +17,190 @@ from typing import TYPE_CHECKING, Literal
 import torch
 
 current_platform = None
+
+
+# ---------------------------------------------------------------------------
+# Compiled CUDA extension — my_vllm._C
+# ---------------------------------------------------------------------------
+#
+# Built via ``python setup.py build_ext --inplace -j3`` (see setup.py →
+# csrc/cache_kernels.cu).  Provides the vLLM-canonical cache block ops:
+#
+#   reshape_and_cache / reshape_and_cache_flash
+#   swap_blocks / copy_blocks / cp_gather_cache
+#   convert_fp8 / concat_and_cache_mla
+#
+# The hot path is still the Triton kernel triton_reshape_and_cache_flash
+# (C149); these CUDA ops provide the full vLLM API surface (CUDA-graph
+# fallback, FP8 conversion, prefix-cache CoW gather, MLA stub).
+#
+# Import is deferred so that environments without the compiled .so can
+# still import my_vllm for tests that don't touch the cache kernels.
+
+def _load_c_extension():
+    try:
+        from my_vllm import _C  # noqa: F401
+        return _C
+    except ImportError:
+        return None
+
+
+_C_CACHE_OPS = _load_c_extension()
+
+
+def _reshape_and_cache_cuda(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kv_cache_dtype: str,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+) -> None:
+    """CUDA dispatch via my_vllm._C.reshape_and_cache (when available)."""
+    if _C_CACHE_OPS is None:
+        _reshape_and_cache_python_fallback(
+            key, value, key_cache, value_cache, slot_mapping,
+        )
+        return
+    _C_CACHE_OPS.reshape_and_cache(
+        key, value, key_cache, value_cache,
+        slot_mapping, kv_cache_dtype, k_scale, v_scale,
+    )
+
+
+def _reshape_and_cache_flash_cuda(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kv_cache_dtype: str,
+    k_scale: torch.Tensor,
+    v_scale: torch.Tensor,
+) -> None:
+    """CUDA dispatch via my_vllm._C.reshape_and_cache_flash (CUDA-graph path)."""
+    if _C_CACHE_OPS is None:
+        raise RuntimeError(
+            "reshape_and_cache_flash CUDA op requires the compiled my_vllm._C "
+            "extension; rebuild with `python setup.py build_ext --inplace -j3`."
+        )
+    _C_CACHE_OPS.reshape_and_cache_flash(
+        key, value, key_cache, value_cache,
+        slot_mapping, kv_cache_dtype, k_scale, v_scale,
+    )
+
+
+def _swap_blocks_cuda(
+    src: torch.Tensor,
+    dst: torch.Tensor,
+    block_size_in_bytes: int,
+    block_mapping: torch.Tensor,
+) -> None:
+    """CUDA dispatch via my_vllm._C.swap_blocks (preemption / beam search)."""
+    if _C_CACHE_OPS is None:
+        raise RuntimeError(
+            "swap_blocks CUDA op requires the compiled my_vllm._C extension; "
+            "rebuild with `python setup.py build_ext --inplace -j3`."
+        )
+    _C_CACHE_OPS.swap_blocks(src, dst, block_size_in_bytes, block_mapping)
+
+
+def _copy_blocks_cuda(
+    key_caches: list[torch.Tensor],
+    value_caches: list[torch.Tensor],
+    block_mapping: torch.Tensor,
+) -> None:
+    """CUDA dispatch via my_vllm._C.copy_blocks (prefix-cache CoW copy)."""
+    if _C_CACHE_OPS is None:
+        raise RuntimeError(
+            "copy_blocks CUDA op requires the compiled my_vllm._C extension; "
+            "rebuild with `python setup.py build_ext --inplace -j3`."
+        )
+    _C_CACHE_OPS.copy_blocks(key_caches, value_caches, block_mapping)
+
+
+def _cp_gather_cache_cuda(
+    src_cache: torch.Tensor,
+    dst: torch.Tensor,
+    block_table: torch.Tensor,
+    cu_seq_lens: torch.Tensor,
+    batch_size: int,
+) -> None:
+    """CUDA dispatch via my_vllm._C.cp_gather_cache (non-contiguous gather)."""
+    if _C_CACHE_OPS is None:
+        raise RuntimeError(
+            "cp_gather_cache CUDA op requires the compiled my_vllm._C "
+            "extension; rebuild with `python setup.py build_ext --inplace -j3`."
+        )
+    _C_CACHE_OPS.cp_gather_cache(
+        src_cache, dst, block_table, cu_seq_lens, batch_size,
+    )
+
+
+def _convert_fp8_cuda(
+    dst_cache: torch.Tensor,
+    src_cache: torch.Tensor,
+    scale: float,
+    kv_cache_dtype: str,
+) -> None:
+    """CUDA dispatch via my_vllm._C.convert_fp8 (FP8 ↔ BF16/FP16)."""
+    if _C_CACHE_OPS is None:
+        raise RuntimeError(
+            "convert_fp8 CUDA op requires the compiled my_vllm._C extension; "
+            "rebuild with `python setup.py build_ext --inplace -j3`."
+        )
+    _C_CACHE_OPS.convert_fp8(dst_cache, src_cache, scale, kv_cache_dtype)
+
+
+def _concat_and_cache_mla_cuda(
+    kv_c: torch.Tensor,
+    k_pe: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    kv_cache_dtype: str,
+    scale: torch.Tensor,
+) -> None:
+    """CUDA dispatch via my_vllm._C.concat_and_cache_mla (MLA stub)."""
+    if _C_CACHE_OPS is None:
+        raise RuntimeError(
+            "concat_and_cache_mla CUDA op requires the compiled my_vllm._C "
+            "extension; rebuild with `python setup.py build_ext --inplace -j3`."
+        )
+    _C_CACHE_OPS.concat_and_cache_mla(
+        kv_c, k_pe, kv_cache, slot_mapping, kv_cache_dtype, scale,
+    )
+
+
+def _reshape_and_cache_python_fallback(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+) -> None:
+    """Pure-PyTorch reshape_and_cache fallback (matches
+    v1/attention/ops/paged_attn.py::reshape_and_cache_pytorch semantics)."""
+    block_size = key_cache.shape[2]
+    valid = slot_mapping >= 0
+    if not valid.any():
+        return
+    valid_slots = slot_mapping[valid]
+    block_ids = valid_slots // block_size
+    offsets = valid_slots % block_size
+    key_cache[block_ids, :, offsets, :] = key[valid]
+    value_cache[block_ids, :, offsets, :] = value[valid]
+
+
+# Public re-exports for callers (v1/attention/ops/paged_attn.py, tests).
+reshape_and_cache = _reshape_and_cache_cuda
+reshape_and_cache_flash = _reshape_and_cache_flash_cuda
+swap_blocks = _swap_blocks_cuda
+copy_blocks = _copy_blocks_cuda
+cp_gather_cache = _cp_gather_cache_cuda
+convert_fp8 = _convert_fp8_cuda
+concat_and_cache_mla = _concat_and_cache_mla_cuda
 
 
 class Fp8KVCacheDataType(IntEnum):

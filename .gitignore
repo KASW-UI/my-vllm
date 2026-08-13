@@ -7,3 +7,6 @@ dist/
 build/
 .pytest_cache/
 .idea/misc.xml
+# Compiled CUDA extension (csrc/cache_kernels.cu → my_vllm._C)
+my_vllm/_C*.so
+
