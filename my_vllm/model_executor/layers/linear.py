@@ -492,11 +492,26 @@ class QKVParallelLinear(ColumnParallelLinear):
             disable_tp=disable_tp,
         )
 
+    def validate_shard_id(self, shard_id: Any) -> bool:
+        """Validate that shard_id is one of {'q', 'k', 'v', None}.
+
+        Mirrors vllm QKVParallelLinear.validate_shard_id (TypeIs narrowing
+        omitted — my-vllm is unquantized-only).
+        """
+        if shard_id in {"q", "k", "v"} or shard_id is None:
+            return True
+        raise ValueError(
+            "Shard id for QKVParallelLinear should be 'q', 'k', or 'v', "
+            f"got shard id {shard_id}."
+        )
+
     def _get_shard_offset_mapping(self, loaded_shard_id: str) -> int:
         return {
             "q": 0,
             "k": self.num_heads * self.head_size,
             "v": (self.num_heads + self.num_kv_heads) * self.head_size,
+            "total": (self.num_heads + self.num_kv_heads) * self.head_size
+            + self.num_kv_heads * self.v_head_size,
         }.get(loaded_shard_id, 0)
 
     def _get_shard_size_mapping(self, loaded_shard_id: str) -> int:
@@ -540,6 +555,35 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         assert param_data.shape == loaded_weight.shape
         param_data.copy_(loaded_weight)
+
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[str]:
+        """Per-layer weight loader — mirrors vllm QKVParallelLinear.load_weights.
+
+        Iterates (name, loaded_weight) pairs; for each, dispatches to the
+        Parameter's weight_loader with the loaded weight's `shard_id`
+        attribute (q/k/v/None). The yielded names let the caller track
+        which weights were consumed.
+
+        Quantization paths (PackedColumnParameter, PerTensorScaleParameter,
+        BlockQuantScaleParameter) are out of scope for my-vllm.
+        """
+        import logging
+        logger = logging.getLogger(__name__)
+        for name, loaded_weight in weights:
+            shard_id = getattr(loaded_weight, "shard_id", None)
+            self.validate_shard_id(shard_id)
+            param: Parameter
+            if "." in name:
+                submodule, _, attr = name.rpartition(".")
+                param = getattr(self.get_submodule(submodule), attr, self)
+            else:
+                param = getattr(self, name, self)
+            if param is None and name == "bias":
+                continue
+            param.weight_loader(param, loaded_weight, shard_id)
+            yield name
 
 
 # --------------------------------------------------------------------------
