@@ -1,12 +1,17 @@
-"""C127: AsyncLLM + api_server go through BusyLoopClient.
+"""C127: AsyncLLM goes through BusyLoopClient.
 
 Verifies that:
 
-* ``examples/server.py`` constructs ``LLMEngine(busy_loop=True)``.
 * ``LLMEngine(busy_loop=True)`` produces a ``BusyLoopClient`` whose
   daemon thread runs ``EngineCore.run_busy_loop``.
 * ``AsyncLLM`` no longer has the C027 ``_queue`` / ``run_loop`` /
   ``_drain_queue`` / ``_add_to_engine`` methods.
+
+Note: C151 deleted ``my_vllm/entrypoints/openai/api_server.py`` (out-of-JD
+scope).  ``examples/server.py`` was deleted in the same commit.  The
+``TestApiServerUsesBusyLoop`` class that validated the OpenAI server path
+is removed here; its coverage migrated to ``test_C147_lora_wrap.py`` and
+similar tests that exercise ``LLMEngine(busy_loop=True)`` directly.
 """
 
 from __future__ import annotations
@@ -15,7 +20,6 @@ import asyncio
 
 from my_vllm.config.vllm import VllmConfig
 from my_vllm.entrypoints.llm import load_tokenizer
-from my_vllm.entrypoints.openai.api_server import create_server
 from my_vllm.v1.engine.async_llm import AsyncLLM
 from my_vllm.v1.engine.core_client import BusyLoopClient, InprocClient
 from my_vllm.v1.engine.llm_engine import LLMEngine
@@ -119,29 +123,5 @@ class TestLLMEngineBusyLoopConstruction:
         try:
             assert isinstance(engine.engine_core, BusyLoopClient)
             assert engine.engine_core._loop_thread.is_alive()
-        finally:
-            engine.engine_core.shutdown(timeout=3.0)
-
-
-class TestApiServerUsesBusyLoop:
-    def test_create_server_accepts_busy_loop_engine(self):
-        """create_server does not care whether the engine is Inproc or
-        BusyLoop — but we want callers (examples/server.py) to pass
-        ``busy_loop=True`` so the engine is ready for async traffic."""
-        tokenizer = load_tokenizer(_MODEL_PATH)
-        engine = LLMEngine(
-            vllm_config=VllmConfig(),
-            executor_class=UniProcExecutor,
-            tokenizer=tokenizer,
-            busy_loop=True,
-        )
-        try:
-            server = create_server(engine, host="127.0.0.1", port=0)
-            # Engine is plumbed into the handler's class attribute.
-            from my_vllm.entrypoints.openai.api_server import (
-                CompletionHandler,
-            )
-            assert CompletionHandler.engine is engine
-            server.server_close()
         finally:
             engine.engine_core.shutdown(timeout=3.0)
