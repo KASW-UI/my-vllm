@@ -10,8 +10,8 @@ C051: multi-policy scheduling — FCFS/Priority via SchedulingPolicy.
 C052: preemption — _preempt_request frees KV blocks + resets tokens.
 C122: schedule() body tightens to a top-to-bottom pipeline:
       chunk-continue → pull-new → cached-data → assemble.
-      LoRA multiplexing, multi-tenant quotas, KV-budget preemption each
-      live in a dedicated helper (mirrors EngineCore C121).
+      LoRA multiplexing and KV-budget preemption each live in a
+      dedicated helper (mirrors EngineCore C121).
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ class Scheduler(SchedulerInterface):
     C051: policy parameter selects FCFS or Priority scheduling.
     C052: preempt_request frees KV blocks, resets num_computed_tokens, requeues.
     C122: schedule() is a 4-step pipeline (chunk_continue → pull_new →
-          cached_data → assemble); LoRA/tenant/KV-preemption concerns live
+          cached_data → assemble); LoRA/KV-preemption concerns live
           in helpers, not inline.
     """
 
@@ -68,13 +68,6 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_manager = kv_cache_manager
         self.max_num_batched_tokens = sc.max_num_batched_tokens
         self.lora_config = vllm_config.lora_config
-        self.multi_tenant_config = vllm_config.multi_tenant_config
-
-        if self.multi_tenant_config.enabled:
-            self._per_tenant_usage: dict[str, dict[str, int]] = {
-                t.tenant_id: {"gpu_slots": 0, "kv_blocks": 0}
-                for t in self.multi_tenant_config.tenants
-            }
 
     # ── Public API ──────────────────────────────────────────────────────
 
@@ -179,12 +172,12 @@ class Scheduler(SchedulerInterface):
         preempted_req_ids: set[str],
         scheduled_loras: set[int],
     ) -> None:
-        """Drain the waiting queue, honoring LoRA + tenant + KV quotas.
+        """Drain the waiting queue, honoring LoRA + KV quotas.
 
         Each popped request runs through budget checks (gpu, token,
-        LoRA, tenant-gpu, tenant-kv). On any check failure the request
-        is requeued (prepended) and we stop pulling. NewRequestData
-        entries accumulate in `new_req_datas`.
+        LoRA, kv). On any check failure the request is requeued
+        (prepended) and we stop pulling. NewRequestData entries
+        accumulate in `new_req_datas`.
         """
         skipped_lora_reqs: list[Request] = []
 
@@ -210,17 +203,9 @@ class Scheduler(SchedulerInterface):
                 skipped_lora_reqs.append(req)
                 continue
 
-            # Multi-tenant quota.
-            tenant_id = self._get_tenant_id(req)
-            if tenant_id is not None and not self._try_admit_tenant(
-                req, tenant_id, preempted_req_ids,
-            ):
-                skipped_lora_reqs.append(req)
-                continue
-
             # KV cache allocation; preempt if needed.
             allocated = self._try_allocate_kv(
-                req, tenant_id, preempted_req_ids,
+                req, preempted_req_ids,
             )
             if allocated is None:
                 self.waiting.prepend_request(req)
@@ -269,27 +254,9 @@ class Scheduler(SchedulerInterface):
             return True
         return req.lora_request.lora_int_id in scheduled_loras
 
-    def _try_admit_tenant(
-        self,
-        req: Request,
-        tenant_id: str | None,
-        preempted_req_ids: set[str],
-    ) -> bool:
-        """Multi-tenant GPU budget: admit, preempt cross-tenant, or reject."""
-        if tenant_id is None:
-            return True
-        if self._has_tenant_gpu_budget(tenant_id):
-            return True
-        if self._try_inter_tenant_preempt(
-            req, tenant_id, preempted_req_ids,
-        ):
-            return self._has_tenant_gpu_budget(tenant_id)
-        return False
-
     def _try_allocate_kv(
         self,
         req: Request,
-        tenant_id: str | None,
         preempted_req_ids: set[str],
     ):
         """Allocate KV blocks for `req`. Preempt if budget exceeded.
@@ -316,14 +283,6 @@ class Scheduler(SchedulerInterface):
             blocks = self.kv_cache_manager.allocate_slots(req, prompt_len)
             if not self._has_kv_budget(blocks):
                 return None
-
-        # Tenant KV budget after allocation.
-        if (
-            tenant_id is not None
-            and not self._has_tenant_kv_budget(tenant_id)
-        ):
-            self.waiting.prepend_request(req)
-            return None
 
         return (blocks, num_cached, n_prefix_blocks)
 
@@ -442,99 +401,6 @@ class Scheduler(SchedulerInterface):
             if blocks is not None:
                 return True
         return False
-
-    # ── C120 multi-tenant budget checks ─────────────────────────────────
-
-    def _get_tenant_id(self, request: Request) -> str | None:
-        """Get the tenant ID for a request, if multi-tenant is enabled."""
-        if not self.multi_tenant_config.enabled:
-            return None
-        return getattr(request, "tenant_id", None)
-
-    def _count_tenant_gpu_slots(self, tenant_id: str) -> int:
-        return sum(
-            1 for r in self.running
-            if r.status != RequestStatus.PREEMPTED
-            and getattr(r, "tenant_id", None) == tenant_id
-        )
-
-    def _count_tenant_kv_blocks(self, tenant_id: str) -> int:
-        if self.kv_cache_manager is None:
-            return 0
-        total = 0
-        for rid, blocks in self.kv_cache_manager.request_blocks.items():
-            req = self._find_request(rid)
-            if (
-                req is not None
-                and getattr(req, "tenant_id", None) == tenant_id
-            ):
-                total += len(blocks)
-        return total
-
-    def _has_tenant_gpu_budget(self, tenant_id: str) -> bool:
-        tenant = self.multi_tenant_config.get_tenant(tenant_id)
-        if tenant is None:
-            return True
-        used = self._count_tenant_gpu_slots(tenant_id)
-        if used < tenant.max_gpu_slots:
-            return True
-        if self.multi_tenant_config.allow_burst and self._has_gpu_budget():
-            return True
-        return False
-
-    def _has_tenant_kv_budget(self, tenant_id: str) -> bool:
-        tenant = self.multi_tenant_config.get_tenant(tenant_id)
-        if tenant is None or self.kv_cache_manager is None:
-            return True
-        used = self._count_tenant_kv_blocks(tenant_id)
-        if used < tenant.max_kv_cache_blocks:
-            return True
-        if self.multi_tenant_config.allow_burst:
-            return True
-        return False
-
-    def _try_inter_tenant_preempt(
-        self,
-        request: Request,
-        tenant_id: str,
-        preempted_ids: set[str],
-    ) -> bool:
-        """Preempt requests from lower-priority tenants to make room."""
-        if not self.multi_tenant_config.preempt_lower_priority:
-            return False
-        if not self.running:
-            return False
-
-        tenant = self.multi_tenant_config.get_tenant(tenant_id)
-        if tenant is None:
-            return False
-
-        victims = [
-            r for r in self.running
-            if r.status == RequestStatus.RUNNING
-            and getattr(r, "tenant_id", None) != tenant_id
-        ]
-        # Sort by tenant priority (lowest first).
-        victims.sort(key=lambda r: self._get_tenant_priority(
-            getattr(r, "tenant_id", None),
-        ))
-
-        for victim in victims:
-            victim_priority = self._get_tenant_priority(
-                getattr(victim, "tenant_id", None),
-            )
-            if victim_priority >= tenant.priority:
-                continue
-            self._preempt_request(victim)
-            preempted_ids.add(victim.request_id)
-            return True
-        return False
-
-    def _get_tenant_priority(self, tenant_id: str | None) -> int:
-        if tenant_id is None:
-            return 0
-        tenant = self.multi_tenant_config.get_tenant(tenant_id)
-        return tenant.priority if tenant else 0
 
     # ── C038 resource budget checks ─────────────────────────────────────
 

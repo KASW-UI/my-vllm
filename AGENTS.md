@@ -25,7 +25,11 @@ Every file in `my_vllm/` must correspond to a real file in `vllm/`. No invented 
 
 **Current status**: C128. LOOP-PLAN §5 done criteria all checked off: `EngineCore.run_busy_loop()` + `input_queue`/`output_queue`/`shutdown_state` live; `LLMEngine` holds an `EngineCoreClient` (no direct `EngineCore(`); `AsyncLLM` no longer has naive loop / `asyncio.Queue`; offline (Inproc) and server/async (BusyLoop) produce byte-identical output. See `docs/snapshots/C128.md` for the closure write-up.
 
-**Next**: post-loop scope — distributed ZMQ / multiproc / DP / LoRA / quantization, per `Engineer-Spec` P0/P1 list.
+**Next**: job-relevant subset alignment, per **`docs/alignment-plan.md`** (authoritative plan; every module annotated with its reference `vllm/...` source file). Order: 阶段 0 剪枝 (prune multi-tenant, non-OPT models, duplicate files) → 阶段 1 file-tree fixes (10 invented files) → 阶段 2 P0 object boundaries → 阶段 3 Must-Implement paths → 阶段 4 distributed multi-machine abstraction. LoRA is kept (user-requested).
+
+## Scope decision (JD-driven)
+
+The final form is a **minimal clean subset mapped to the job description (JD)**, not a scaled-down vLLM. A module is kept only if it serves one of the JD keywords: 性能/成本/稳定性, PD 分离, 分布式 KV Cache, 异构推理, 弹性计算, GPU/CUDA, 分布式系统 (+ 网络/RDMA). Clean removal = delete the file **and** its imports, config fields, and all references — no NoOp/ABC placeholders, no dangling imports. Never keep something just because vLLM has it.
 
 ## Commands
 
@@ -94,7 +98,8 @@ The **engineering spec** (`Engineer-Spec/README.md`) defines the alignment stand
 - **P0** (10 items): Core skeletons that must be reproduced — Unified Execution Model, Paged KV path, KV Cache hierarchy, Block identity, Scheduler model, Request/RequestState, InputBatch, Attention Backend, Executor/Worker/Runner boundary, Distributed abstraction
 - **P1** (5 items): Should be gradually aligned — Dynamic KV init, Model layers, OPT model, Sampler boundary, Metrics
 - **Must implement**: Speculative Decoding, EP, CP, KV Connector, at least one Quantization path — these alter GPU execution, KV Cache, batching, scheduler, communication, or model parallelism and cannot remain NoOp/ABC
-- **Architecture + limited implementation**: LoRA, Mamba, Multimodal, Structured Output — understand Runtime impact; implement one working path where necessary
+- **Keep (career-relevant)**: LoRA — one working Dense-Linear path
+- **Delete (no JD match)**: Mamba/SSM, Multimodal, Structured Output, multi-tenant, pooler/embedding/rerank, encoder-decoder, non-OPT models, non-CUDA platforms, non-FP8 quantization backends, entrypoints business surface — remove cleanly, no dangling imports
 - **Excluded from core code**: K8s, Ray, Autoscaling — understand theoretically, but not in `my_vllm/`; may exist as a separate `deployment/` experiment
 
 ## 4-Level alignment framework
@@ -109,7 +114,7 @@ The **engineering spec** (`Engineer-Spec/README.md`) defines the alignment stand
 ## Before EVERY code modification:
 
 1. Read `Engineer-Spec/README.md` for the target alignment standard
-2. Check the Implementation scope tiers — confirm the feature is in P0/P1/Must Implement scope, not Architecture-only or Excluded
+2. Check `docs/alignment-plan.md` (keep/delete matrix + reference `vllm/...` path) and the Implementation scope tiers — confirm the feature is in P0/P1/Must Implement/Keep scope, not Delete or Excluded
 3. Read the real vLLM source at `/home/kasw/文档/GitHub/GPU-Project/vllm` for API verification
 4. Confirm the file exists in real vLLM's file tree
 5. Match vLLM class names, method names, dataclass field names exactly

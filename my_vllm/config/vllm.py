@@ -6,7 +6,6 @@ from typing import TYPE_CHECKING
 from my_vllm.config.cache import CacheConfig
 from my_vllm.config.lora import LoRAConfig
 from my_vllm.config.model import ModelConfig
-from my_vllm.config.multi_tenant import MultiTenantConfig
 from my_vllm.config.parallel import ParallelConfig
 from my_vllm.config.quantization import QuantizationConfig
 from my_vllm.config.scheduler import SchedulerConfig
@@ -25,9 +24,6 @@ class VllmConfig:
         default_factory=QuantizationConfig
     )
     lora_config: LoRAConfig | None = None
-    multi_tenant_config: MultiTenantConfig = field(
-        default_factory=MultiTenantConfig
-    )
     kv_transfer_config: "KVTransferConfig | None" = None
 
 

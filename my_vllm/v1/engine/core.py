@@ -8,7 +8,7 @@ The hot path (step) is a 12-line pipeline:
 C017: batch prefill via executor.execute_model().
 C025: output processing delegated to OutputProcessor.
 C048: metrics collection — SchedulerStats + IterationStats per step.
-C112: P/D disaggregation (NIXL), LoRA multiplexing, multi-tenant quotas,
+C112: P/D disaggregation (NIXL), LoRA multiplexing, KV quotas,
       CUDA Event profiling — all reachable as side-module helpers,
       not inlined into step().
 C121: tighten step() body to a top-to-bottom pipeline. Every concern
@@ -71,7 +71,7 @@ class EngineCore:
     step() body is intentionally short: every per-step concern beyond the
     core V1 loop (schedule → execute → update_from_output) lives in a
     dedicated helper. The 12-line top-to-bottom shape matches nano-vllm's
-    LLMEngine.step() while still wiring C112 features (LoRA, multi-tenant,
+    LLMEngine.step() while still wiring C112 features (LoRA,
     NIXL P/D) via the side-module helpers.
     """
 
