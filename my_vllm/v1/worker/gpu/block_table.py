@@ -5,13 +5,54 @@ Mirrors vLLM V1 v1/worker/gpu/block_table.py:17.
 C019: replaces the old Python-list BlockTable with GPU tensor
 block tables and slot_mappings.
 C118: compute_slot_mappings dispatches to a Triton kernel
-(v1/attention/ops/triton_slot_mapping.py) instead of a per-req
-Python loop with .item() syncs. Single KV cache group, no CP.
+(inlined below as `_compute_slot_mappings_kernel`) instead of a
+per-req Python loop with .item() syncs. Single KV cache group, no CP.
+
+C131: kernel + wrapper inlined from the former
+`v1/attention/ops/triton_slot_mapping.py` into this file, matching
+vLLM's layout (vllm/v1/worker/gpu/block_table.py:_compute_slot_mappings_kernel
+at L250).
 """
 
 import torch
+import triton
+import triton.language as tl
 
-from my_vllm.v1.attention.ops.triton_slot_mapping import compute_slot_mapping
+
+@triton.jit
+def _compute_slot_mappings_kernel(
+    query_start_loc_ptr,   # [num_reqs + 1] int32
+    positions_ptr,          # [num_tokens]   int64
+    block_table_ptr,        # [num_reqs, max_blocks] int32
+    block_table_stride,     # int32
+    slot_mapping_ptr,       # [num_tokens]   int64 (out)
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Per-token slot_mapping kernel — slot_id = block_id * BLOCK_SIZE + offset.
+
+    Layout assumptions:
+      query_start_loc: [num_reqs + 1] int32
+      positions:       [num_tokens]   int64
+      block_table:     [num_reqs, max_num_blocks] int32
+      block_size:      constexpr (compile-time)
+      slot_mapping:    [num_tokens] int64 (out)
+    """
+    batch_idx = tl.program_id(0)
+    start = tl.load(query_start_loc_ptr + batch_idx)
+    end = tl.load(query_start_loc_ptr + batch_idx + 1)
+
+    # Per-token slot mapping:
+    #   block_idx = pos // block_size
+    #   offset    = pos % block_size
+    #   slot_id   = block_table[batch_idx, block_idx] * block_size + offset
+    row_base = block_table_ptr + batch_idx * block_table_stride
+    for i in range(start, end):
+        pos = tl.load(positions_ptr + i).to(tl.int64)
+        block_idx = pos // BLOCK_SIZE
+        offset = pos % BLOCK_SIZE
+        block_id = tl.load(row_base + block_idx)
+        slot_id = block_id * BLOCK_SIZE + offset
+        tl.store(slot_mapping_ptr + i, slot_id)
 
 
 class BlockTables:
@@ -76,13 +117,14 @@ class BlockTables:
                   + (pos % block_size)
         """
         num_reqs = query_start_loc.shape[0] - 1
-        compute_slot_mapping(
-            query_start_loc=query_start_loc,
-            positions=positions,
-            block_table=self.block_table,
-            block_size=self.block_size,
-            slot_mapping=self.slot_mappings,
-            num_reqs=num_reqs,
+        self.slot_mappings.fill_(-1)
+        _compute_slot_mappings_kernel[(num_reqs,)](
+            query_start_loc,
+            positions,
+            self.block_table,
+            self.block_table.stride(0),
+            self.slot_mappings,
+            BLOCK_SIZE=self.block_size,
         )
         return self.slot_mappings[:num_tokens]
 

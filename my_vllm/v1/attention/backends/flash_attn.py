@@ -9,8 +9,8 @@ import torch
 import torch.nn.functional as F
 
 from my_vllm.v1.attention.backend import AttentionBackend, AttentionImpl
-from my_vllm.v1.attention.metadata import CommonAttentionMetadata
-from my_vllm.v1.attention.backends.ops.paged_attn import (
+from my_vllm.v1.attention.backend import CommonAttentionMetadata
+from my_vllm.v1.attention.ops.paged_attn import (
     gather_cached_kv_pytorch,
     reshape_and_cache_pytorch,
 )

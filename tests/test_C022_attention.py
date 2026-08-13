@@ -2,8 +2,7 @@
 
 import torch
 
-from my_vllm.v1.attention.backend import AttentionBackend, AttentionImpl
-from my_vllm.v1.attention.metadata import CommonAttentionMetadata
+from my_vllm.v1.attention.backend import AttentionBackend, AttentionImpl, CommonAttentionMetadata
 from my_vllm.v1.attention.selector import get_attn_backend
 from my_vllm.v1.attention.backends.flash_attn import (
     FlashAttentionBackend, FlashAttentionImpl,

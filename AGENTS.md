@@ -71,7 +71,7 @@ my_vllm/
     worker/            # WorkerBase, Worker, GPUModelRunner
       gpu/             # BlockTables, InputBatch, RequestState, PPHandler, model_states/
     executor/          # Executor ABC, UniProcExecutor, MultiprocExecutor, RayDistributedExecutor, ray_utils
-    attention/         # AttentionBackend ABC, CommonAttentionMetadata, selector, backends/flash_attn, backends/ops/paged_attn
+    attention/         # AttentionBackend ABC, CommonAttentionMetadata, selector, backends/flash_attn, ops/paged_attn, ops/triton_*
     sample/            # Sampler (nn.Module), LogitsProcessor, SamplingMetadata
     metrics/           # stats, loggers, prometheus
     engine/__init__.py # FinishReason, EngineCoreOutput, EngineCoreOutputs

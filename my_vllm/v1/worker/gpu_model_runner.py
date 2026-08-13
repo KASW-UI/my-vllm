@@ -35,7 +35,7 @@ import numpy as np
 import torch
 
 from my_vllm.forward_context import set_forward_context
-from my_vllm.v1.attention.metadata import CommonAttentionMetadata
+from my_vllm.v1.attention.backend import CommonAttentionMetadata
 from my_vllm.v1.core.sched.output import SchedulerOutput
 from my_vllm.v1.outputs import ModelRunnerOutput, SamplerOutput
 from my_vllm.v1.sample.metadata import SamplingMetadata

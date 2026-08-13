@@ -1,4 +1,10 @@
-"""NIXL (NVIDIA In-Xfer Library) KV connector."""
+"""NIXL (NVIDIA In-Xfer Library) KV connector.
+
+Mirrors vllm/distributed/kv_transfer/kv_connector/v1/nixl/.
+
+C131: NixlConnector implementation now lives in `.connector`
+(renamed from the formerly-invented `nixl_connector.py`).
+"""
 
 from ..base import (
     KVConnectorBase_V1,
@@ -31,29 +37,15 @@ class NixlConnectorWorkerMetadata(KVConnectorWorkerMetadata):
         return merged
 
 
-class NixlConnector(KVConnectorBase_V1):
-    def __init__(self, vllm_config, role: KVConnectorRole, kv_cache_config):
-        super().__init__(vllm_config, role, kv_cache_config)
-        self._nixl_agent = None
-        self._pending_saves: int = 0
+# Re-export the canonical NixlConnector implementation.
+# Two classes previously existed (one in __init__.py, one in
+# nixl_connector.py); C131 collapses them — the concrete implementation
+# lives in .connector.
+from .connector import NixlConnector  # noqa: E402
 
-    def start_load_kv(self, forward_context, **kwargs):
-        pass
-
-    def wait_for_layer_load(self, layer_name: str):
-        pass
-
-    def save_kv_layer(self, layer_name, kv_layer, attn_metadata, **kwargs):
-        self._pending_saves += 1
-
-    def wait_for_save(self):
-        self._pending_saves = 0
-
-    def get_num_new_matched_tokens(self, request, block_pool) -> int:
-        return 0
-
-    def request_finished(self, request, block_ids):
-        return False, None
-
-    def build_connector_worker_meta(self):
-        return NixlConnectorWorkerMetadata()
+__all__ = [
+    "NixlConnector",
+    "NixlConnectorMetadata",
+    "NixlConnectorHandshakeMetadata",
+    "NixlConnectorWorkerMetadata",
+]

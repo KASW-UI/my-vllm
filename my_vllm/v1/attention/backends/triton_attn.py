@@ -16,7 +16,7 @@ for the two kernels (matches vllm triton_attn.py:821).
 import torch
 
 from my_vllm.v1.attention.backend import AttentionBackend, AttentionImpl
-from my_vllm.v1.attention.metadata import CommonAttentionMetadata
+from my_vllm.v1.attention.backend import CommonAttentionMetadata
 from my_vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
 )
