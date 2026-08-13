@@ -25,7 +25,7 @@ Every file in `my_vllm/` must correspond to a real file in `vllm/`. No invented 
 
 **Current status**: C151. All alignment phases + LoRA专项 complete (55/55 items closed); follow-up wire-ups 4/4 done; cleanup phase A (out-of-JD scope) closed. KV cache hierarchy mirrors vLLM (Manager → Coordinator → SingleTypeKVCacheManager → FullAttentionManager). KV transfer migrated to vLLM-canonical `distributed/.../v1/base.py` with `KVConnectorFactory` + `ExampleConnector`. Scheduler has 3-level pipeline + utils + AsyncScheduler skeleton. FP8 KV cache end-to-end: `kv_cache_dtype=fp8_e4m3` allocates the cache in `float8_e4m3fn`, `reshape_and_cache_flash` takes the FP8 path with per-tensor K/V scales (C149). Multi-process NCCL end-to-end: `init_distributed_environment` + canonical `Worker.init_device` sequence + `MultiprocExecutor._init_executor` exports `MASTER_ADDR`/`MASTER_PORT`/`WORLD_SIZE` env vars (C150). LoRA Dense-Linear forward path end-to-end runnable. `update_lora_modules()` wraps OPTForCausalLM targets (C147). `GPUModelRunner` inherits `LoRAModelRunnerMixin` and `_set_active_lora()` activates the per-step adapter inside `execute_model` (C148). Out-of-JD scope pruned (C151): Ray executor / Ray utils / OpenAI api_server / `examples/server.py` / `deploy/` (K8s + autoscaling) deleted; `my_vllm/` no longer references any of these. Invented-file count: 0. See `docs/snapshots/C151.md` for closure write-up.
 
-**Next**: K8s 部署计划（C152-C158，7 个 commit）— 见 `k8s-deploy-plan.md`。决策：解耦先行（C157 K8s 侧先 put，my_vllm `VLLM_ROLE` env 解析入 PD 分离计划），真部署（kind + 本地 docker，本地镜像投放；无 GPU 节点时降级 CPU 模式验证 deploy 编排）。完成后接 阶段 B 欠账（per `docs/cleanup-plan.md` §3）— spec_decode（Must-implement）/ elastic_ep / rotary_embedding 走哪条路需用户决策；最后 production-side concerns（monitor / entrypoints business surface / PD 分离端到端验证）。
+**Next**: K8s 部署计划（C153-C159，7 个 commit）— 见 `k8s-deploy-plan.md`。决策：解耦先行（C158 K8s 侧先 put，my_vllm `VLLM_ROLE` env 解析入 PD 分离计划 C160+），真部署（kind + 本地 docker，本地镜像投放；无 GPU 节点时降级 CPU 模式验证 deploy 编排）。完成后接 阶段 B 欠账（per `docs/cleanup-plan.md` §3）— spec_decode（Must-implement）/ elastic_ep / rotary_embedding 走哪条路需用户决策；最后 production-side concerns（monitor / entrypoints business surface / PD 分离端到端验证）。
 
 ## Scope decision (JD-driven)
 
@@ -99,12 +99,12 @@ run.py                 # CLI entry point
 csrc/                  # C++/CUDA sources (cache_kernels.cu, quantization/)
 setup.py               # build _C extension
 examples/              # run.py, benchmark.py
-deploy/                # K8s 部署实验 (C152-C158, 独立于 my_vllm/，仅通过 HTTP/env/Prometheus 交互)
+deploy/                # K8s 部署实验 (C153-C159, 独立于 my_vllm/，仅通过 HTTP/env/Prometheus 交互)
   k8s/                 # namespace/configmap/deployment/statefulset/service/hpa/pdb/sa/kustomization
   observability/       # ServiceMonitor + Prometheus rules + Grafana dashboard
   autoscaling/         # 独立 scaler.py controller (HPA 不足场景)
   disaggregated/       # PD 分离部署 (prefill + decode 两套 Deployment)
-k8s-deploy-plan.md     # C152-C158 执行计划 (新)
+k8s-deploy-plan.md     # C153-C159 执行计划 (新)
 LOOP-PLAN.md           # C124→C128 plan (busy loop + EngineCoreClient)
 ```
 
