@@ -222,17 +222,20 @@ class Scheduler(SchedulerInterface):
         for req in reversed(skipped_lora_reqs):
             self.waiting.prepend_request(req)
 
+        # Build cached_data from running reqs that were NOT just scheduled
+        # as new in this step. Mirrors vLLM v1/core/sched/scheduler.py:
+        # _make_cached_request_data() — new reqs (scheduled_new_reqs) are
+        # excluded so the runner consumes each request exactly once per step.
+        new_req_ids = {d.req_id for d in new_req_datas}
+        cached_running = [
+            r for r in self.running
+            if r.status != RequestStatus.PREEMPTED
+            and r.request_id not in new_req_ids
+        ]
         cached_data = CachedRequestData(
-            req_ids=[r.request_id for r in self.running
-                     if r.status != RequestStatus.PREEMPTED],
-            num_computed_tokens=[
-                r.num_computed_tokens for r in self.running
-                if r.status != RequestStatus.PREEMPTED
-            ],
-            num_output_tokens=[
-                r.num_output_tokens for r in self.running
-                if r.status != RequestStatus.PREEMPTED
-            ],
+            req_ids=[r.request_id for r in cached_running],
+            num_computed_tokens=[r.num_computed_tokens for r in cached_running],
+            num_output_tokens=[r.num_output_tokens for r in cached_running],
         )
 
         total_tokens = sum(
@@ -501,6 +504,12 @@ class Scheduler(SchedulerInterface):
                     break
                 req.append_output_token_ids(tok)
                 new_tokens.append(tok)
+
+            # Mirrors vLLM v1/core/sched/scheduler.py:1240
+            # (`request.num_computed_tokens += num_scheduled_token`). Each
+            # sampled token advances the request's KV-cache pointer so the
+            # next decode step reads the correct slot for the next query.
+            req.num_computed_tokens += len(new_tokens)
 
             limit = req.max_tokens or self._DEFAULT_MAX_TOKENS
             if req.num_output_tokens >= limit and not req.is_finished():

@@ -105,11 +105,22 @@ class LLMEngine:
         prompt: str,
         max_new_tokens: int = 50,
     ) -> dict:
-        """Blocking single-request generation."""
+        """Blocking single-request generation.
+
+        Runs steps until the request finishes (EOS, length cap, etc.) or
+        has_work() drains. Each step may produce zero or more outputs for the
+        request; we accumulate the latest output_text and return once
+        finish_reason is set.
+        """
         req_id = self.add_request(prompt, max_new_tokens=max_new_tokens)
+        last_result: dict | None = None
         while self.has_work():
             results = self.step()
             for r in results:
                 if r["request_id"] == req_id:
-                    return r
+                    last_result = r
+                    if r.get("finish_reason"):
+                        return r
+        if last_result is not None:
+            return last_result
         return {"request_id": req_id, "text": "", "finish_reason": "UNKNOWN"}
