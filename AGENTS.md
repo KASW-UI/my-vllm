@@ -25,7 +25,9 @@ Every file in `my_vllm/` must correspond to a real file in `vllm/`. No invented 
 
 **Current status**: C151. All alignment phases + LoRA专项 complete (55/55 items closed); follow-up wire-ups 4/4 done; cleanup phase A (out-of-JD scope) closed. KV cache hierarchy mirrors vLLM (Manager → Coordinator → SingleTypeKVCacheManager → FullAttentionManager). KV transfer migrated to vLLM-canonical `distributed/.../v1/base.py` with `KVConnectorFactory` + `ExampleConnector`. Scheduler has 3-level pipeline + utils + AsyncScheduler skeleton. FP8 KV cache end-to-end: `kv_cache_dtype=fp8_e4m3` allocates the cache in `float8_e4m3fn`, `reshape_and_cache_flash` takes the FP8 path with per-tensor K/V scales (C149). Multi-process NCCL end-to-end: `init_distributed_environment` + canonical `Worker.init_device` sequence + `MultiprocExecutor._init_executor` exports `MASTER_ADDR`/`MASTER_PORT`/`WORLD_SIZE` env vars (C150). LoRA Dense-Linear forward path end-to-end runnable. `update_lora_modules()` wraps OPTForCausalLM targets (C147). `GPUModelRunner` inherits `LoRAModelRunnerMixin` and `_set_active_lora()` activates the per-step adapter inside `execute_model` (C148). Out-of-JD scope pruned (C151): Ray executor / Ray utils / OpenAI api_server / `examples/server.py` / `deploy/` (K8s + autoscaling) deleted; `my_vllm/` no longer references any of these. Invented-file count: 0. See `docs/snapshots/C151.md` for closure write-up.
 
-**Next**: K8s 部署计划（C153-C159，7 个 commit）— 见 `k8s-deploy-plan.md`。决策：解耦先行（C158 K8s 侧先 put，my_vllm `VLLM_ROLE` env 解析入 PD 分离计划 C160+），真部署（kind + 本地 docker，本地镜像投放；无 GPU 节点时降级 CPU 模式验证 deploy 编排）。完成后接 阶段 B 欠账（per `docs/cleanup-plan.md` §3）— spec_decode（Must-implement）/ elastic_ep / rotary_embedding 走哪条路需用户决策；最后 production-side concerns（monitor / entrypoints business surface / PD 分离端到端验证）。
+**JD gap analysis (post-C151)**: Hard-skill coverage vs JD ≈ 50–55% (excluding K8s). Gaps identified: GPU profiling / roofline (zero), NCCL benchmark & RDMA 笔记 (zero), CUDA cache block ops beyond `reshape_and_cache` (only single-op/single-dtype), Triton unified attention depth verification, PD 分离端到端验证, custom IPC all-reduce (zero), spec_decode / elastic_ep / rotary_embedding 决策 + 实装, VMM allocator. Plan drafted at `jd-gap-closure-plan.md` — 16 commits (C200–C233), Triton vs CUDA split per JD mapping (Triton: attention/MoE/spec_decode/rotary; CUDA: cache ops/comm/CUTLASS/VMM).
+
+**Next**: JD gap closure plan (C200–C233, 16 commits) — 见 `jd-gap-closure-plan.md`. **Phase 1 硬性 + GPU Runtime 深度**（C200–C214，7 commit）：profile 工具链 + roofline 笔记；NCCL benchmark + nccl-architecture / rdma-overview 笔记；`cache_kernels.cu` 多 op + 多 dtype 升级（copy_blocks / swap_blocks / concat_mla）；`triton_unified_attention` 五档 KV_QUANT_MODE + PD-aware 三档验证；`triton_reshape_and_cache_flash` 全 quant 对齐；PD 分离单进程 e2e 数值一致性；`custom_all_reduce.cu` + IPC 同 host 多卡。**Phase 2 架构深度 + 加分**（C220–C224，5 commit）：CUTLASS scaled MM benchmark / fused_moe Triton kernel 引入 / CPU-GPU 异构实验 / ngram spec_decode 真实实装 / rotary_embedding fused 路径。**Phase 3 收尾**（C230–C233，4 commit）：elastic_ep 接线 + rebalance / cumem_allocator (VMM) / `docs/notes/` 笔记集 / 全量回归。**Backlog**：K8s 部署计划 (C153–C159，7 commit) — `k8s-deploy-plan.md` 仍在仓库根未 tracked，可并行 Phase 3 或 Phase 3 完成后启动。
 
 ## Scope decision (JD-driven)
 
@@ -195,3 +197,20 @@ See `Prompt/Engineer-Spec/README.md` § Model loading — init/load separation, 
 ## Model dependency
 
 Model is `facebook/opt-125m`, loaded from a local checkpoint (`my_vllm/model_executor/model_loader.py` + `entrypoints/llm.py` both default `_LOCAL_MODEL_PATH = "/home/kasw/文档/GitHub/cpu-vllm/opt-125m"`). The model must be available for any run or test.
+
+## Repository conventions
+
+- **Planning docs are untracked by design.** Multi-commit execution plans
+  (e.g. `docs/cleanup-plan.md`, `k8s-deploy-plan.md`,
+  `jd-gap-closure-plan.md`) drive future work but are **not** part of
+  any commit's source diff. They follow the C151 precedent (commit
+  message: *"planning artefact — left untracked, not part of the source
+  diff"*). Reasoning: commit captures the **code snapshot**; plans are
+  drafts. Executed work lives in commit messages +
+  `docs/snapshots/Cxxx.md`. If a plan needs permanent history, move it to
+  `docs/plans/` and commit explicitly with a non-`Cxxx` message.
+- **AGENTS.md numbering alignment.** Whenever a new Cxxx-numbered
+  planning doc (or external numbering scheme) shifts, sync AGENTS.md in
+  the same commit window. Pattern: small standalone `Cxxx-prep` docs
+  commits (e.g. `C153-prep: AGENTS.md sync ...`) rather than rolling the
+  sync into the next real commit.
