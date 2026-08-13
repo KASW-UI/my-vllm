@@ -1,5 +1,6 @@
 """C019: tests for BlockTables GPU tensor block table."""
 
+import pytest
 import torch
 
 from my_vllm.v1.worker.gpu.block_table import BlockTables
@@ -7,13 +8,15 @@ from my_vllm.v1.worker.gpu.block_table import BlockTables
 
 class TestBlockTables:
     @staticmethod
-    def _make_block_tables(block_size=16):
+    def _make_block_tables(block_size=16, device=None):
+        if device is None:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         return BlockTables(
             block_size=block_size,
             max_num_reqs=4,
             max_num_blocks=64,
             max_num_batched_tokens=256,
-            device=torch.device("cpu"),
+            device=device,
         )
 
     def test_init(self):
@@ -47,30 +50,40 @@ class TestBlockTables:
         assert int(bt.num_blocks[0].item()) == 4
         assert int(bt.block_table[0, 3].item()) == 13
 
+    @pytest.mark.skipif(
+        not torch.cuda.is_available(),
+        reason="Triton slot_mapping kernel requires CUDA",
+    )
     def test_compute_slot_mappings_single_request(self):
         bt = self._make_block_tables(block_size=4)
         bt.append_block_ids(0, [3])
         # Request 0: 6 tokens → needs 2 blocks
         # block 0 [0..3] → block_id 3, slots 12..15
         # block 1 [4..5] → would need a second block_id, but we only gave 1
-        query_start = torch.tensor([0, 6], dtype=torch.long)
+        query_start = torch.tensor([0, 6], dtype=torch.long, device=bt.device)
         positions = torch.tensor(
-            [0, 1, 2, 3, 4, 5], dtype=torch.long
+            [0, 1, 2, 3, 4, 5], dtype=torch.long, device=bt.device,
         )
         slots = bt.compute_slot_mappings(query_start, positions, 6)
         # Token 0: pos=0 → block=0, offset=0 → slot=3*4+0=12
         assert int(slots[0].item()) == 12
         assert int(slots[3].item()) == 15
 
+    @pytest.mark.skipif(
+        not torch.cuda.is_available(),
+        reason="Triton slot_mapping kernel requires CUDA",
+    )
     def test_compute_slot_mappings_multi_request(self):
         bt = self._make_block_tables(block_size=4)
         bt.append_block_ids(0, [1])  # req 0: block 1
         bt.append_block_ids(1, [5])  # req 1: block 5
         # req 0: 3 tokens
         # req 1: 2 tokens
-        query_start = torch.tensor([0, 3, 5], dtype=torch.long)
+        query_start = torch.tensor(
+            [0, 3, 5], dtype=torch.long, device=bt.device,
+        )
         positions = torch.tensor(
-            [0, 1, 2, 0, 1], dtype=torch.long
+            [0, 1, 2, 0, 1], dtype=torch.long, device=bt.device,
         )
         slots = bt.compute_slot_mappings(query_start, positions, 5)
         # req 0, token 0: pos=0 → block=0, offset=0 → 1*4+0=4
