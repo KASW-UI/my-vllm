@@ -19,6 +19,14 @@ def get_fp8_min_max():
 
 
 def is_quantized_kv_cache(dtype) -> bool:
+    """Return True if `dtype` (string) names a quantized KV-cache format.
+
+    Mirrors vLLM V1 v1/attention/ops/triton_reshape_and_cache_flash.py:
+    is_quantized_kv_cache. C149: real implementation (was a stub
+    returning `False`).
+    """
+    if isinstance(dtype, str):
+        return dtype.startswith("fp8") or dtype.startswith("int8") or dtype.startswith("int4")
     return False
 
 FP8_MIN, FP8_MAX = get_fp8_min_max()

@@ -195,13 +195,31 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # V = [..., head_dim:]. Matches vllm TritonAttentionBackend.
         # get_kv_cache_shape and is what TritonAttentionImpl expects via
         # bind_kv_cache (single 5D tensor per layer).
+        # C149: when `kv_cache_dtype` is FP8, allocate in
+        # `current_platform.fp8_dtype()` for half-memory storage.
+        kv_cache_dtype = self.vllm_config.cache_config.kv_cache_dtype
+        if kv_cache_dtype.startswith("fp8"):
+            from my_vllm.platforms import current_platform
+            kv_cache_torch_dtype = current_platform.fp8_dtype()
+        else:
+            kv_cache_torch_dtype = self.dtype
         self.kv_cache = torch.zeros(
             self.num_layers, self.max_num_blocks, self.num_kv_heads,
             self.block_size, 2 * self.head_dim,
-            dtype=self.dtype, device=self.device,
+            dtype=kv_cache_torch_dtype, device=self.device,
         )
 
         self._bind_kv_caches()
+
+        # C149: install per-layer KV scales when FP8 is
+        # configured. The default per-layer scale (0.1) is a
+        # conservative FP8 quantization bound — real vLLM uses
+        # a calibration pass or checkpoint-provided scales.
+        # The default scale=1.0 path remains in effect when
+        # `kv_cache_dtype == "auto"`, preserving pre-C149
+        # behaviour exactly.
+        if kv_cache_dtype.startswith("fp8"):
+            self._install_fp8_kv_scales(default_scale=0.1)
 
         # C148: opt-in LoRA init. When `vllm_config.lora_config`
         # is set, wrap target Linear layers with `*LoRA`
@@ -223,6 +241,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def _bind_kv_caches(self) -> None:
         for i, layer in enumerate(self.model.model.decoder.layers):
             layer.self_attn.attn.bind_kv_cache(self.kv_cache[i])
+
+    def _install_fp8_kv_scales(self, default_scale: float = 0.1) -> None:
+        """Install per-layer K/V scales for FP8 KV cache (C149).
+
+        For each decoder layer, calls
+        `attn.set_kv_scales(k_scale, v_scale)` with a 1-element
+        float32 tensor of `default_scale`. Real vLLM computes
+        these via a calibration forward pass or loads them from
+        a HF checkpoint's `kv_scales` field; my-vllm uses the
+        conservative default which keeps FP8 quantization in
+        range for typical attention magnitudes.
+
+        Idempotent — safe to call multiple times.
+        """
+        scale = torch.tensor(
+            [default_scale], dtype=torch.float32, device=self.device,
+        )
+        for layer in self.model.model.decoder.layers:
+            attn = layer.self_attn.attn
+            if hasattr(attn, "set_kv_scales"):
+                attn.set_kv_scales(scale, scale)
 
     # ── CUDA graph capture (nano-vllm style; mirrors vllm cudagraph_utils) ─
 

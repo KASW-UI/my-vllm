@@ -93,14 +93,63 @@ class Attention(nn.Module, AttentionLayerBase):
             num_kv_heads,
             **extra_impl_args,
         )
+        # C149: pull the KV cache dtype from `cache_config`
+        # and propagate to the impl so the reshape_and_cache
+        # call takes the FP8 path when configured.
+        kv_cache_dtype = (
+            cache_config.kv_cache_dtype
+            if cache_config is not None
+            and hasattr(cache_config, "kv_cache_dtype")
+            else "auto"
+        )
+        if hasattr(self.impl, "set_kv_cache_dtype"):
+            self.impl.set_kv_cache_dtype(kv_cache_dtype)
+
         self.kv_cache: torch.Tensor | tuple[torch.Tensor, ...] = torch.tensor([])
-        self.kv_cache_dtype = "auto"
-        self.kv_cache_torch_dtype = torch.get_default_dtype()
+        self.kv_cache_dtype = kv_cache_dtype
+        self.kv_cache_torch_dtype = self._resolve_kv_cache_torch_dtype(kv_cache_dtype)
         self.quant_config = quant_config
         self.cache_config = cache_config
         self.calculate_kv_scales = False
         self.dtype = torch.get_default_dtype()
         self.use_direct_call = True
+
+        # C149: per-tensor K / V scales for FP8 quantization.
+        # Defaults preserve pre-C149 behaviour (no scale
+        # applied — see TritonAttentionImpl.set_kv_scales).
+        # The engine runner injects real scales via
+        # set_kv_scales(...) after the KV cache is allocated.
+        self._k_scale: torch.Tensor | None = None
+        self._v_scale: torch.Tensor | None = None
+
+    @staticmethod
+    def _resolve_kv_cache_torch_dtype(kv_cache_dtype: str) -> torch.dtype:
+        """Map `cache_config.kv_cache_dtype` (string) to a torch.dtype.
+
+        Returns the platform's FP8 dtype for any FP8 string;
+        falls back to the default dtype for "auto".
+        """
+        if kv_cache_dtype.startswith("fp8"):
+            from my_vllm.platforms import current_platform
+            return current_platform.fp8_dtype()
+        return torch.get_default_dtype()
+
+    def set_kv_scales(
+        self,
+        k_scale: torch.Tensor | None,
+        v_scale: torch.Tensor | None,
+    ) -> None:
+        """Inject per-tensor K / V scales for FP8 quantization.
+
+        Forwarded to `self.impl.set_kv_scales(...)` if the
+        impl supports it (TritonAttentionImpl does). Called by
+        the GPUModelRunner after the KV cache is allocated and
+        per-tensor scales are computed.
+        """
+        self._k_scale = k_scale
+        self._v_scale = v_scale
+        if hasattr(self.impl, "set_kv_scales"):
+            self.impl.set_kv_scales(k_scale, v_scale)
 
     def forward(
         self,

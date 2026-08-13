@@ -51,6 +51,11 @@ class TritonAttentionImpl(AttentionImpl):
 
     Mirrors vllm/v1/attention/backends/triton_attn.py:TritonAttentionImpl.forward
     (non-quantized, single KV cache group, no CP, no DCP).
+    C149: KV cache dtype + per-tensor K/V scales are now
+    plumbed in via `set_kv_cache_dtype(...)` /
+    `set_kv_scales(k_scale, v_scale)` so the
+    `triton_reshape_and_cache_flash` call takes the FP8 path
+    when the engine is configured for FP8 storage.
     """
 
     def __init__(
@@ -68,6 +73,44 @@ class TritonAttentionImpl(AttentionImpl):
         self.use_alibi_sqrt = False
         self.sliding_window = None
         self.logits_soft_cap = None
+        # C149: KV cache dtype + per-tensor scales. Defaults
+        # preserve the pre-C149 behaviour (BF16 store, scale=1).
+        self.kv_cache_dtype: str = "auto"
+        self._k_scale: torch.Tensor | None = None
+        self._v_scale: torch.Tensor | None = None
+
+    def set_kv_cache_dtype(self, kv_cache_dtype: str) -> None:
+        """Configure the KV cache storage dtype for this impl.
+
+        One of:
+          - "auto" (default) — store KV in the model's dtype
+            (BF16/FP16). Same as the pre-C149 behaviour.
+          - "fp8_e4m3" / "fp8_e5m2" / "fp8" — quantize per
+            tensor on write via the existing
+            `reshape_and_cache_kernel_flash` FP8 path with
+            `k_scale` / `v_scale`.
+
+        Called from `Attention.__init__` after the impl is
+        constructed so the dtype follows `cache_config`.
+        """
+        self.kv_cache_dtype = kv_cache_dtype
+
+    def set_kv_scales(
+        self,
+        k_scale: torch.Tensor | None,
+        v_scale: torch.Tensor | None,
+    ) -> None:
+        """Set the per-tensor K / V scales for FP8 quantization.
+
+        Each scale is a 1-element float32 tensor (typically on
+        the same device as the KV cache). When unset
+        (defaults to `None`) the impl uses scale=1.0, which
+        preserves the pre-C149 behaviour regardless of
+        `kv_cache_dtype` (i.e. the FP8 cast becomes a no-op
+        truncation).
+        """
+        self._k_scale = k_scale
+        self._v_scale = v_scale
 
     def forward(
         self,
@@ -106,9 +149,22 @@ class TritonAttentionImpl(AttentionImpl):
         max_query_len = attn_metadata.max_query_len
         max_seq_len = attn_metadata.max_seq_len
 
-        kv_cache_dtype = "auto"
-        k_scale = torch.tensor([1.0], device=query.device, dtype=torch.float32)
-        v_scale = torch.tensor([1.0], device=query.device, dtype=torch.float32)
+        kv_cache_dtype = self.kv_cache_dtype
+        # C149: honour the per-layer scales when present,
+        # otherwise fall back to scale=1.0 (the pre-C149
+        # behaviour — FP8 cast becomes a no-op truncation).
+        if self._k_scale is not None:
+            k_scale = self._k_scale
+        else:
+            k_scale = torch.tensor(
+                [1.0], device=query.device, dtype=torch.float32,
+            )
+        if self._v_scale is not None:
+            v_scale = self._v_scale
+        else:
+            v_scale = torch.tensor(
+                [1.0], device=query.device, dtype=torch.float32,
+            )
 
         # Step 1: Split HND packed kv_cache into separate flash-layout K/V.
         # (B, H, N, 2*hs).transpose(1, 2) → (B, N, H, 2*hs) → split on last dim.
