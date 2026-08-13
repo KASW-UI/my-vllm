@@ -6,22 +6,38 @@ C112: KVTransferConfig for P/D disaggregation.
 C113: QuantizationConfig for heterogeneous inference.
 """
 
+from my_vllm.config.attention import AttentionConfig
 from my_vllm.config.cache import CacheConfig
+from my_vllm.config.device import DeviceConfig
+from my_vllm.config.kernel import (
+    IrOpPriorityConfig,
+    KernelConfig,
+    LinearBackend,
+    MoEBackend,
+)
 from my_vllm.config.kv_transfer import KVTransferConfig
 from my_vllm.config.lora import LoRAConfig
 from my_vllm.config.model import ModelConfig
 from my_vllm.config.quantization import QuantizationConfig, QuantizationMethod
 from my_vllm.config.scheduler import SchedulerConfig
+from my_vllm.config.speculative import SpeculativeConfig
 from my_vllm.config.vllm import EngineConfig, VllmConfig
 
 __all__ = [
+    "AttentionConfig",
     "CacheConfig",
+    "DeviceConfig",
     "EngineConfig",
+    "IrOpPriorityConfig",
+    "KernelConfig",
     "KVTransferConfig",
+    "LinearBackend",
     "LoRAConfig",
     "ModelConfig",
+    "MoEBackend",
     "QuantizationConfig",
     "QuantizationMethod",
     "SchedulerConfig",
+    "SpeculativeConfig",
     "VllmConfig",
 ]

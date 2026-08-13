@@ -124,5 +124,14 @@ KVConnectorFactory.register_connector(
     "NixlConnector",
 )
 
+# C137: ExampleConnector — debug reference connector (vLLM's
+# disk-storage demo impl). In my-vllm it's an alias of NixlConnector
+# (shared-memory backend); see example_connector.py for rationale.
+KVConnectorFactory.register_connector(
+    "ExampleConnector",
+    "my_vllm.distributed.kv_transfer.kv_connector.v1.example_connector",
+    "ExampleConnector",
+)
+
 
 __all__ = ["KVConnectorFactory"]
