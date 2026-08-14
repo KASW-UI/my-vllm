@@ -61,9 +61,9 @@ Every file in `my_vllm/` must correspond to a real file in `vllm/`. No invented 
 - **C232** — `docs/notes` 综合笔记集 (index + 3 surveys). `docs/notes/README.md` (NEW 191 lines): single-entry-point index with topical map + JD-keyword map + commit→note map + reading order + source-of-truth pointer. `docs/notes/gpu-arch-primer.md` (NEW 306 lines): SM / warp / memory hierarchy / tensor-core throughput matrix / Roofline / occupancy primer. `docs/notes/vllm-runtime-overview.md` (NEW 428 lines): top-down walkthrough of the vLLM V1 runtime stack (HTTP → EngineCore → Scheduler → Executor → Worker → GPUModelRunner → Model → Attention → Sampler), each layer annotated with the `my_vllm/` file + the Cxxx commit, plus architectural boundaries + performance hotspots + "where to start debugging". `docs/notes/quantization-landscape.md` (NEW 315 lines): FP8 / INT8 / INT4 (Marlin / AWQ / GPTQ) / FP4 (NVFP4) survey with the format zoo + accuracy-throughput tradeoff + per-tensor vs per-token vs per-channel + activation-outlier problem + per-GPU decision tree. Total: 8 notes, 2,589 lines (was 4 notes, 1,349 lines). Each new note ≥ 306 lines per `jd-gap-closure-plan.md` §C232 acceptance.
 - **C233** — 全量回归 (Phase 1+2+3 闭环). Regression check across all 14 Phase 1+2+3 commits (C200-C232 excluding the deleted C222). `pytest tests/test_C{200,201,210,211,212,213,214,220,221,223,224,230,231}_*.py` → **230 passed + 4 skipped** (2 C212 failures are test pollution between sessions — pass 5/5 isolated; pre-existing PyTorch CUDA state issue, not a regression). `python run.py` → end-to-end pass (checkpoint load + prefill + decode + token emission + LENGTH stop). `grep -rn "NotImplementedError" my_vllm/` → **43 hits, all intentional**: 28 ABC abstract methods (WorkerBase / QuantizationConfig / AttentionBackend / FusedMoERouter / CustomOp.forward_native-cuda-hip / WorkerProfiler / Platform.forward_tpu / KVCacheQuantConfig / FusedTopKRouter) + 12 documented class shells (eagle.py / draft_model.py per C223; logprobs.py / cp_utils.py / multiproc_executor.py per cleanup) + 3 dispatcher stubs (create_spec_decode_proposer). All 14 Phase 1+2+3 snapshots + tags present. Per `jd-gap-closure-plan.md` §C233-final: Phase 1+2+3 **fully closed**.
 
-**JD gap analysis (post-C233, Phase 1+2+3 fully closed)**: Hard-skill coverage vs JD ≈ 88-90% (excluding K8s). Filled since C151: GPU profiling + roofline, NCCL + RDMA, CUDA cache block ops (7 ops / multi-dtype), Triton unified attention (PD-aware + per-token-head quant), PD 分离 (ExampleConnector + cp_gather_cache), custom IPC all-reduce, CUTLASS scaled MM (FP8/INT8/BF16), Triton fused MoE (token alignment + grouped GEMM), ngram spec decoder (Numba-JIT + KMP-style LPS), fused RoPE (Triton + GQA), elastic EP rebalance (state machine + threshold policy), CUDA VMM allocator (real C ext: cuMemCreate/Map/Unmap), **8 comprehensive engineering notes (2,589 lines)**. Pre-cleanup-era test failures (72 in C001-C031 + C126-C128 + hot_path) are **expected** per `AGENTS.md` "Test expectations" — they're pre-C151-cleanup artifacts, not regressions from Phase 1+2+3 work.
+**JD gap analysis (post-C243, Phase 1+2+3 closed + Phase 4 at 4/10)**: Hard-skill coverage vs JD ≈ 89-90% (excluding K8s). Filled since C151: GPU profiling + roofline, NCCL + RDMA, CUDA cache block ops (7 ops / multi-dtype), Triton unified attention (PD-aware + per-token-head quant), PD 分离 (ExampleConnector + cp_gather_cache), custom IPC all-reduce, CUTLASS scaled MM (FP8/INT8/BF16), Triton fused MoE (token alignment + grouped GEMM), ngram spec decoder (Numba-JIT + KMP-style LPS), fused RoPE (Triton + GQA), elastic EP rebalance (state machine + threshold policy), CUDA VMM allocator (real C ext: cuMemCreate/Map/Unmap), ring all-to-all (AgRs backend + prepare/finalize ABCs), SymmMem / NVLS heuristic + dispatch, SHM broadcast + ObjectStorage, **cross-process weight transfer** (3 backends + packed-tensor efficiency), **12 comprehensive engineering notes (4,478 lines)**. Pre-cleanup-era test failures (72 in C001-C031 + C126-C128 + hot_path) are **expected** per `AGENTS.md` "Test expectations" — they're pre-C151-cleanup artifacts, not regressions from Phase 1+2+3+4 work.
 
-**Next**: **Backlog**: K8s 部署计划 (C153-C159, 7 commits) — `k8s-deploy-plan.md` 仍在仓库根未 tracked，可与已闭环的 Phase 1+2+3 并行启动。Phase 3 closure ≠ project closure。
+**Next**: **Phase 3 backlog** (C244-C249, 6 commits: Quick AllReduce notes / Async Scheduler / KV-aware scheduling / EP rebalance 闭环 w/ C243 / distributed comm benchmark + 笔记). **Phase 4** (C250-C259, 10 commits: NIXL KV Connector / KV event bus / PD 闭环 / KV offload / KV spec registry / PD benchmark). **Phase 5** (C260-C269, 10 commits: Scheduler priority+preemption / CUDA VMM sleep 闭环 / Inductor piecewise / Spec decode runner 闭环 / MoE AllToAll 集成 / MLA / Warmup / UVA offload). **K8s 部署计划** (C153-C159, 7 commits) — `k8s-deploy-plan.md` 仍在仓库根未 tracked，可与已闭环的 Phase 1+2+3+4 并行启动。Phase 3 closure ≠ project closure。
 
 ## Scope decision (JD-driven)
 
@@ -131,6 +131,8 @@ my_vllm/
   distributed/         # → vllm/distributed/  parallel_state.py (GroupCoordinator)
     elastic_ep/        # elastic_state.py (骨架) + rebalance.py (策略+工厂, C230)
     kv_transfer/       # KVConnectorBase_V1 / factory / example_connector / nixl
+    weight_transfer/   # C243: WeightTransferEngine ABC + NCCL/sparse/IPC backends
+                       #   + packed_tensor + factory + InProcessVLLMWeightSyncClient
   model_executor/      # → vllm/model_executor/  model_loader, custom_op, layers/, models/
     layers/            # linear, activation, layernorm, logits_processor, vocab_parallel_embedding,
                        #   attention/{attention.py, attention_layer_base.py}, fused_moe/, quantization/, rotary_embedding/{base,common,triton_rotary}.py
@@ -184,20 +186,27 @@ examples/              # run.py + benchmark scripts
                        #   pd_disaggregated.py                  (C212) — P→D e2e via ExampleConnector
                        #   ngram_proposer_benchmark.py          (C223) — NgramProposer sweep
                        #   profile_attention.py                 (C200) — unified_attention wall-clock
-                       #   rotary_embedding_benchmark.py        (C224) — Triton vs PyTorch rotary
-                       #   profile_cache_write.py               (C200) — triton_reshape_and_cache_flash
-                       #   quant_gemm_benchmark.py              (C220) — BF16 vs FP8 vs INT8 GEMM sweep
-                       #   moe_benchmark.py                     (C221) — fused vs unfused MoE synthetic
+#   rotary_embedding_benchmark.py        (C224) — Triton vs PyTorch rotary
+                        #   profile_cache_write.py               (C200) — triton_reshape_and_cache_flash
+                        #   quant_gemm_benchmark.py              (C220) — BF16 vs FP8 vs INT8 GEMM sweep
+                        #   moe_benchmark.py                     (C221) — fused vs unfused MoE synthetic
+                        #   all2all_benchmark.py                 (C240) — AG+RS ring all-to-all sweep
+                        #   symm_mem_benchmark.py                (C241) — symm_mem heuristic + identity benchmark
+                        #   shm_benchmark.py                     (C242) — SHM MessageQueue + ObjectStorage microbench
 docs/notes/            # Deep-dive notes (per Cxxx items + 3 new C232 surveys)
-                       #   README.md                  (C232) — index + topical / JD / reading-order map
-                       #   gpu-arch-primer.md         (C232) — SM/warp/memory/Roofline/occupancy primer
-                       #   vllm-runtime-overview.md   (C232) — top-down vLLM V1 stack walkthrough
-                       #   quantization-landscape.md  (C232) — FP8/INT4/Marlin/AWQ/NVFP4 survey
-                       #   gpu-profiling.md           (C200) — Nsight Compute / roofline
-                       #   nccl-architecture.md      (C201) — ring/tree allreduce + NVLink/IB routing
-                       #   rdma-overview.md          (C201) — IB Verbs / RoCE / iWARP / NCCL plugin
-                       #   cutlass-scaled-mm.md      (C220) — scaled_mm contract + Marlin/Machete/DeepGEMM ecosystem
-                       # total: 8 notes / 2,589 lines
+                        #   README.md                  (C232) — index + topical / JD / reading-order map
+                        #   gpu-arch-primer.md         (C232) — SM/warp/memory/Roofline/occupancy primer
+                        #   vllm-runtime-overview.md   (C232) — top-down vLLM V1 stack walkthrough
+                        #   quantization-landscape.md  (C232) — FP8/INT4/Marlin/AWQ/NVFP4 survey
+                        #   gpu-profiling.md           (C200) — Nsight Compute / roofline
+                        #   nccl-architecture.md      (C201) — ring/tree allreduce + NVLink/IB routing
+                        #   rdma-overview.md          (C201) — IB Verbs / RoCE / iWARP / NCCL plugin
+                        #   cutlass-scaled-mm.md      (C220) — scaled_mm contract + Marlin/Machete/DeepGEMM ecosystem
+                        #   all2all-overview.md       (C240) — ring all-to-all + DeepEP/NIXL/FlashInfer backend survey
+                        #   symm-mem-overview.md      (C241) — NVLS hardware + PyTorch _symmetric_memory + vLLM heuristic
+                        #   shm-broadcast-overview.md (C242) — SHM ring buffer + MessageQueue + ObjectStorage
+                        #   weight-transfer-overview.md (C243) — RLHF topology + 3 backends + packed-tensor mechanics
+                        # total: 12 notes / 4,478 lines
 docs/snapshots/         # Per-commit closure write-ups (Goal / Features / Flow / Capability / Limitation / Next)
 deploy/                # NOT YET ADDED — K8s 部署实验 (C153-C159 plan, 独立于 my_vllm/，仅通过 HTTP/env/Prometheus 交互)
                        #   k8s/                 namespace/configmap/deployment/statefulset/service/hpa/pdb/sa/kustomization
