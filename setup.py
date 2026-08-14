@@ -11,7 +11,10 @@ setup(
     ext_modules=[
         CUDAExtension(
             name="my_vllm._C",
-            sources=["csrc/cache_kernels.cu"],
+            sources=[
+                "csrc/cache_kernels.cu",
+                "csrc/custom_all_reduce.cu",
+            ],
             extra_compile_args={
                 "cxx": ["-O2", "-std=c++17"],
                 "nvcc": [

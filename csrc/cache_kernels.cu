@@ -927,6 +927,25 @@ void concat_and_cache_mla(
 // pybind11 module
 // ---------------------------------------------------------------------------
 
+// Forward declarations for the custom_all_reduce bindings (defined in
+// custom_all_reduce.cu).  The custom_all_reduce bindings live in
+// namespace ``my_vllm_py`` to keep them separable from cache kernels.
+using my_ar_fptr_t = int64_t;
+namespace my_vllm_py {
+    my_ar_fptr_t init_custom_ar(const std::vector<my_ar_fptr_t>& fake_ipc_ptrs,
+                                torch::Tensor& rank_data,
+                                int64_t rank,
+                                bool fully_connected);
+    void dispose(my_ar_fptr_t _fa);
+    int64_t meta_size();
+    void register_buffer(my_ar_fptr_t _fa,
+                         const std::vector<my_ar_fptr_t>& fake_ipc_ptrs);
+    torch::Tensor get_handle();
+    my_ar_fptr_t open_mem_handle(torch::Tensor& mem_handle);
+    void all_reduce(my_ar_fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
+                    my_ar_fptr_t _reg_buffer, int64_t reg_buffer_sz_bytes);
+}  // namespace my_vllm_py
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("reshape_and_cache", &reshape_and_cache,
           "Write K/V into paged KV cache (multi-dtype fp16/bf16)",
@@ -967,4 +986,28 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
           pybind11::arg("kv_c"), pybind11::arg("k_pe"),
           pybind11::arg("kv_cache"), pybind11::arg("slot_mapping"),
           pybind11::arg("kv_cache_dtype"), pybind11::arg("scale"));
+
+    // Custom all-reduce ops (from custom_all_reduce.cu).
+    m.def("init_custom_ar", &my_vllm_py::init_custom_ar,
+          "Initialize CustomAllreduce (fptr_t handle)",
+          pybind11::arg("fake_ipc_ptrs"),
+          pybind11::arg("rank_data"),
+          pybind11::arg("rank"),
+          pybind11::arg("fully_connected"));
+    m.def("dispose", &my_vllm_py::dispose, "Free a CustomAllreduce handle");
+    m.def("meta_size", &my_vllm_py::meta_size,
+          "Size of the Signal struct (bytes)");
+    m.def("register_buffer", &my_vllm_py::register_buffer,
+          "Re-bind signal IPC pointers (CUDA Graph capture)",
+          pybind11::arg("fa"), pybind11::arg("fake_ipc_ptrs"));
+    m.def("get_handle", &my_vllm_py::get_handle,
+          "Allocate a Signal buffer + return IPC memhandle");
+    m.def("open_mem_handle", &my_vllm_py::open_mem_handle,
+          "Open a remote IPC memhandle, return local pointer");
+    m.def("all_reduce", &my_vllm_py::all_reduce,
+          "Out-of-place all_reduce (fp32/fp16/bf16)",
+          pybind11::arg("fa"),
+          pybind11::arg("inp"), pybind11::arg("out"),
+          pybind11::arg("reg_buffer") = 0,
+          pybind11::arg("reg_buffer_sz_bytes") = 0);
 }
