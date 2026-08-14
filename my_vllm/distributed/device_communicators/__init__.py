@@ -3,6 +3,10 @@
 C240: introduced for the All-to-All (MoE EP) path.
 C241: adds ``SymmMemCommunicator`` — NVLS-accelerated collectives
 via ``torch.distributed._symmetric_memory``.
+C242: adds ``ShmRingBuffer`` + ``MessageQueue`` (tensor /
+object broadcast over shared memory) and
+``SingleWriterShmObjectStorage`` (key-value store over shared
+memory).
 
 Mirrors ``vllm/distributed/device_communicators/`` but ships only the
 CUDA pieces used by ``AgRsAll2AllManager`` (NCCL/Gloo all-gather +
@@ -31,6 +35,10 @@ Public surface
     via ``torch.distributed._symmetric_memory``.
   * ``all_reduce_utils`` — sizing tables + ``should_nccl_symm_mem_*``
     selection heuristics.
+  * ``shm_broadcast.ShmRingBuffer`` + ``MessageQueue`` — same-host
+    broadcast over shared memory.
+  * ``shm_object_storage.SingleWriterShmObjectStorage`` — same-host
+    key-value store over a shared-memory ring buffer.
 """
 
 from __future__ import annotations
@@ -61,6 +69,19 @@ from my_vllm.distributed.device_communicators.base_device_communicator import (
 from my_vllm.distributed.device_communicators.cuda_communicator import (
     CudaCommunicator,
 )
+from my_vllm.distributed.device_communicators.shm_broadcast import (
+    Handle,
+    MessageQueue,
+    ShmRingBuffer,
+    memory_fence,
+)
+from my_vllm.distributed.device_communicators.shm_object_storage import (
+    ObjectSerde,
+    PickleSerde,
+    ShmObjectStorageHandle,
+    SingleWriterShmObjectStorage,
+    SingleWriterShmRingBuffer,
+)
 from my_vllm.distributed.device_communicators.symm_mem import (
     SymmMemCommunicator,
     is_symmetric_memory_available,
@@ -69,23 +90,32 @@ from my_vllm.distributed.device_communicators.symm_mem import (
 
 __all__ = [
     "All2AllManagerBase",
+    "AgRsAll2AllManager",
     "Cache",
     "CudaCommunicator",
     "CUSTOM_ALL_REDUCE_MAX_SIZES",
-    "DeviceCommunicatorBase",
-    "AgRsAll2AllManager",
     "DeepEPAll2AllManagerBase",
     "DeepEPHTAll2AllManager",
     "DeepEPLLAll2AllManager",
     "DeepEPV2All2AllManager",
+    "DeviceCommunicatorBase",
     "FlashInferNVLinkOneSidedAll2AllManager",
     "FlashInferNVLinkTwoSidedAll2AllManager",
+    "Handle",
+    "MessageQueue",
     "MoriAll2AllManager",
-    "NixlEPAll2AllManager",
     "NCCL_SYMM_MEM_ALL_REDUCE_CONFIG",
+    "NixlEPAll2AllManager",
+    "ObjectSerde",
+    "PickleSerde",
     "SYMM_MEM_ALL_REDUCE_MAX_SIZES",
+    "ShmObjectStorageHandle",
+    "ShmRingBuffer",
+    "SingleWriterShmObjectStorage",
+    "SingleWriterShmRingBuffer",
     "SymmMemCommunicator",
     "is_symmetric_memory_available",
+    "memory_fence",
     "should_nccl_symm_mem_ag_rs",
     "should_nccl_symm_mem_allreduce",
 ]
