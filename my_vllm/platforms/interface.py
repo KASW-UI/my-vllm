@@ -271,8 +271,19 @@ class Platform:
         cls,
         device_id: int = 0,
     ) -> DeviceCapability | None:
-        """Stateless version of torch.cuda.get_device_capability()."""
-        return None
+        """Stateless version of torch.cuda.get_device_capability().
+
+        On CUDA-enabled hosts, returns the live device capability as a
+        ``DeviceCapability`` tuple.  Returns ``None`` when CUDA is
+        unavailable or the device is not visible.
+        """
+        if not torch.cuda.is_available():
+            return None
+        try:
+            major, minor = torch.cuda.get_device_capability(device_id)
+        except (RuntimeError, AssertionError):
+            return None
+        return DeviceCapability(major=major, minor=minor)
 
     @classmethod
     def has_device_capability(
