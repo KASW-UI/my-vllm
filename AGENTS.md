@@ -23,7 +23,7 @@ Every file in `my_vllm/` must correspond to a real file in `vllm/`. No invented 
 
 **Previous history**: Stages C000→C098 were implemented under a prior "educational simulation" model. That history is preserved (never squash/rebase). The project now enters a new phase of **engineering alignment** (C110+) — see `Prompt/Engineer-Spec/README.md` for the full specification.
 
-**Current status**: C220. **Phase 1 (硬性 + GPU Runtime 深度, C200-C214) complete**: 7/7 commits closed. **Phase 2 (架构深度 + 加分, C220-C224) started**: 1/5 done. Cumulative additions since C151:
+**Current status**: C221. **Phase 1 (硬性 + GPU Runtime 深度, C200-C214) complete**: 7/7 commits closed. **Phase 2 (架构深度 + 加分, C220-C224) started**: 2/5 done. Cumulative additions since C151:
 - **C200** — GPU profiling toolchain + roofline notes (`docs/notes/gpu-profiling.md`, 254 lines). Nsight Compute + roofline methodology established.
 - **C201** — NCCL benchmark + communication principle notes. `examples/nccl_benchmark.py` (315 lines: all_reduce/reduce_scatter/all_gather sweep); `docs/notes/nccl-architecture.md` (363 lines: ring vs tree algorithms, NCCL adaptive routing); `docs/notes/rdma-overview.md` (414 lines: IB Verbs / RoCE / iWARP, NCCL plugin interface).
 - **C210** — `csrc/cache_kernels.cu` upgraded from 1 op (reshape_and_cache, single dtype) to 7 ops (reshape_and_cache, reshape_and_cache_flash, swap_blocks, copy_blocks, cp_gather_cache, convert_fp8, concat_and_cache_mla). All 7 exposed via `my_vllm._C`; Python wrappers in `_custom_ops.py`.
@@ -32,8 +32,9 @@ Every file in `my_vllm/` must correspond to a real file in `vllm/`. No invented 
 - **C213** — `triton_reshape_and_cache_flash.py` (630 lines) full 5-KV_QUANT_MODE alignment. Also fixed `Platform.get_device_capability()` (was stub returning None, blocking FP8 storage).
 - **C214** — `csrc/custom_all_reduce.cu` IPC ring all-reduce (313 lines). 7 ops: `init_custom_ar` / `dispose` / `meta_size` / `register_buffer` / `get_handle` / `open_mem_handle` / `all_reduce`. Python wrapper `my_vllm/distributed/custom_all_reduce.py`. world_size=1 identity + world_size=2..8 ring reduce-scatter.
 - **C220** — `cutlass_scaled_mm` Python interface + `scaled_fp8_quant` / `scaled_int8_quant` activation-side quant. `my_vllm/_custom_ops.py` dispatches FP8 → `torch._scaled_mm`, INT8 → `torch._int_mm`, BF16/FP16 → `torch.mm`. `examples/quant_gemm_benchmark.py` (290 lines, BF16 vs FP8 vs INT8 sweep over M × (K,N)); `docs/notes/cutlass-scaled-mm.md` (319 lines: CUTLASS scaled MM contract, scale schemes, Marlin / Machete / DeepGEMM ecosystem, FP8 e4m3 vs e5m2, methodology). 29 tests in `test_C220_quant_gemm.py`. RTX 4060 sm_89: FP8 ~2× BF16, INT8 ~2.3× BF16 at large M (1024+).
+- **C221** — Triton fused MoE kernel + `moe_align_block_size`. `my_vllm/model_executor/layers/fused_moe/{moe_align_block_size.py, fused_moe_triton.py}` (~570 lines: token alignment helper + simplified FP16 grouped-matmul kernel + launcher); `fused_moe.py` dispatcher (Triton + Python fallback). `examples/moe_benchmark.py` (~280 lines, fused vs idealized unfused MoE sweep); 11 tests in `test_C221_fused_moe.py`. Numerically matches per-expert Python reference at M=32; fused approaches unfused TFLOPS at M ≥ 1024 on RTX 4060.
 
-**JD gap analysis (post-C220, Phase 2 start)**: Hard-skill coverage vs JD ≈ 75-80% (excluding K8s). Filled since C151: GPU profiling + roofline, NCCL + RDMA, CUDA cache block ops, Triton unified attention depth, PD 分离, custom IPC all-reduce, CUTLASS scaled MM (Python interface + benchmark). Remaining gaps (drives Phase 2/3): Triton fused_moe (C221), CPU/GPU 异构 (C222), spec_decode ngram (C223), rotary_embedding fused (C224), elastic_ep (C230), VMM allocator (C231).
+**JD gap analysis (post-C221, Phase 2 2/5)**: Hard-skill coverage vs JD ≈ 78-82% (excluding K8s). Filled since C151: GPU profiling + roofline, NCCL + RDMA, CUDA cache block ops, Triton unified attention depth, PD 分离, custom IPC all-reduce, CUTLASS scaled MM (Python interface + benchmark), Triton fused MoE + alignment. Remaining gaps (drives Phase 2/3): CPU/GPU 异构 (C222), spec_decode ngram (C223), rotary_embedding fused (C224), elastic_ep (C230), VMM allocator (C231).
 
 **Next**: Phase 2 (架构深度 + 加分, C220-C224, 5 commits): CUTLASS scaled MM benchmark / Triton fused_moe kernel / CPU-GPU 异构实验 / ngram spec_decode 真实实装 / rotary_embedding fused 路径。Phase 3 (收尾, C230-C233, 4 commits): elastic_ep 接线 + rebalance / cumem_allocator (VMM) / docs/notes 笔记集 / 全量回归。**Backlog**: K8s 部署计划 (C153-C159, 7 commits) — `k8s-deploy-plan.md` 仍在仓库根未 tracked，可并行 Phase 3 或 Phase 3 完成后启动。
 
@@ -139,6 +140,7 @@ examples/              # run.py + benchmark scripts
                        #   profile_attention.py                 (C200) — unified_attention wall-clock
                        #   profile_cache_write.py               (C200) — triton_reshape_and_cache_flash
                        #   quant_gemm_benchmark.py              (C220) — BF16 vs FP8 vs INT8 GEMM sweep
+                       #   moe_benchmark.py                     (C221) — fused vs unfused MoE synthetic
 docs/notes/            # Deep-dive notes (per Cxxx items)
                        #   gpu-profiling.md           (C200) — Nsight Compute / roofline
                        #   nccl-architecture.md      (C201) — ring/tree allreduce + NVLink/IB routing
