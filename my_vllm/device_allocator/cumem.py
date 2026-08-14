@@ -1,93 +1,79 @@
-"""CumemAllocator — Python-level implementation of the cumem
-allocator architecture for my-vllm.
+"""CumemAllocator — wraps the real CUDA Virtual Memory Management (VMM)
+path via the vendored ``my_vllm.cumem_allocator`` C extension.
 
 Mirrors ``vllm/device_allocator/cumem.py`` (377 lines, 2025-04
-snapshot).  The full architecture is reproduced (singleton,
-``use_memory_pool`` context manager, ``sleep`` / ``wake_up``
-API, tag-based bookkeeping via ``AllocationData``) but the
-**actual VMM calls** (``cuMemCreate`` / ``cuMemAddressReserve`
-/ `cuMemMap`` / `cuMemUnmap``) are replaced with PyTorch
-caching-allocator primitives.
+snapshot).  The C extension is ``my_vllm/cumem_allocator.cpp``
+(extracted verbatim from ``vllm/csrc/cumem_allocator.cpp``,
+810 lines).  It implements:
 
-Why no real VMM
----------------
+  * ``cuMemAddressReserve`` / ``cuMemAddressFree`` —
+    virtual address range management.
+  * ``cuMemCreate`` / ``cuMemRelease`` — physical memory
+    chunk allocation.
+  * ``cuMemMap`` / ``cuMemUnmap`` — physical-to-virtual mapping.
+  * ``cuMemSetAccess`` — access permission setup.
+  * Two C entry points (``my_malloc`` / ``my_free``) that
+    PyTorch's ``CUDAPluggableAllocator`` calls via dlsym.
+  * Three Python-callable functions (``init_module``,
+    ``python_create_and_map``, ``python_unmap_and_release``)
+    that vLLM's ``CuMemAllocator`` uses for the sleep /
+    wake_up cycle.
 
-Real vLLM's cumem path is a C extension (``libcumem_allocator.so``)
-that wraps the CUDA Virtual Memory Management API directly.  The
-extension is built per-platform and uses the same approach as the
-NVIDIA driver samples for low-level memory management.
+Architecture
+------------
 
-Building it requires:
+  ┌────────────────────────────────────────────────────────────────┐
+  │  PyTorch CUDA caching allocator                                 │
+  │      ↓ (MemPool-wrapped allocations)                            │
+  │  CUDAPluggableAllocator(libcumem_allocator.so, "my_malloc", …) │
+  │      ↓ dlsym                                                    │
+  │  my_malloc(size, device, stream)  [in csrc/cumem_allocator.cpp] │
+  │      ↓                                                          │
+  │  1. cuMemAddressReserve (virtual range)                        │
+  │  2. python_malloc_callback(handle) [→ CumemAllocator.          │
+  │                                    pointer_to_data[ptr] = …]    │
+  │  3. cuMemCreate (physical chunk)                                │
+  │  4. cuMemMap (physical → virtual)                              │
+  │      ↓ returns device pointer                                   │
+  │  PyTorch tensor gets the pointer                                │
+  └────────────────────────────────────────────────────────────────┘
 
-  * ~500 lines of C++/CUDA (CUDA Driver API wrappers;
-    ``cuMemCreate``, ``cuMemAddressReserve``, ``cuMemMap``,
-    ``cuMemUnmap``, ``cuMemSetAccess``, ``cuMemRelease``,
-    ``cuMemAddressFree``).
-  * CMake wiring into ``setup.py`` (additional CUDA library
-    targets).
-  * A runtime-loaded library dependency that needs to be packaged
-    correctly (PyTorch's ``CUDAPluggableAllocator`` expects a
-    specific ``my_malloc`` / ``my_free`` ABI).
-  * Platform-specific bindings (Linux only — CUDA driver API
-    ctypes wrapping on Windows is a separate effort).
+Sleep / wake_up flow:
 
-This is a 2-3 day effort that consumes the entire Phase 3 budget.
-Production vLLM has it because the H100/Hopper memory savings
-(50%+ on the 80GB pool when serving many small sequences)
-justify the engineering cost.  RTX 4060 (8GB, sm_89) gets
-noticeably less benefit and our workloads are smaller.
+  sleep(offload_tags=("kv_cache",)):
+      for ptr, data in pointer_to_data.items():
+          if data.tag in offload_tags:
+              libcudart.cudaMemcpy(host, ptr, size)
+              data.cpu_backup_tensor = host
+          python_unmap_and_release(*data.handle)
+              # ↑ cuMemUnmap + cuMemRelease
+      torch.cuda.synchronize()
+      torch.cuda.empty_cache()
 
-What C231 ships
----------------
+  wake_up(tags=["kv_cache"]):
+      for ptr, data in pointer_to_data.items():
+          if data.tag in tags:
+              python_create_and_map(*data.handle)
+                  # ↑ cuMemCreate + cuMemMap
+              if data.cpu_backup_tensor is not None:
+                  libcudart.cudaMemcpy(ptr, host, size)
+                  data.cpu_backup_tensor = None
 
-  * **API parity with vLLM.**  Every public method
-    (``get_instance`` / ``use_memory_pool`` / ``sleep`` /
-    ``wake_up`` / ``get_current_usage``) and dataclass
-    (``AllocationData``) is present with the same signature.
-    Production code that imports these from vLLM can be
-    retargeted to my-vllm with a one-line import change.
+The C extension is required for the sleep / wake_up cycle to
+actually free physical memory.  Without it (``extension_loaded
+== False``), the class falls back to Python-level bookkeeping +
+``torch.cuda.empty_cache`` reclamation — adequate for tests
+but missing the per-tensor VMM benefits.
 
-  * **Python-level sleep that actually frees memory.**
-    ``sleep`` calls ``torch.cuda.synchronize`` then
-    ``torch.cuda.empty_cache``.  This releases cached
-    allocation pool blocks back to the driver — not the
-    per-tensor unmapping that real VMM provides, but a
-    meaningful chunk (typically 200MB-1GB depending on
-    fragmentation).
+Build requirement
+-----------------
 
-  * **Tag-based bookkeeping.**  Each ``AllocationData`` carries
-    its tag and a ``cpu_backup_tensor`` slot (None in the
-    Python-only path; populated by the C extension in vLLM).
-    Tests can verify the singleton + tag lifecycle without
-    needing real VMM.
-
-  * **Pluggable allocator hook.**  When PyTorch's
-    ``torch.cuda.memory.MemPool`` API is wired (currently
-    requires the C extension), ``use_memory_pool`` plugs
-    in there.  Today it falls back to a no-op context
-    manager that simply tracks the tag in a Python dict —
-    sufficient for the API contract; missing the actual
-    pool routing.
-
-  * **Singleton + ``atexit`` cleanup.**  Mirrors vLLM's
-    ``CuMemAllocator.instance`` + ``atexit.register`` so the
-    pool reference outlives the busy-loop; only the C-extension
-    path strictly requires this, but we follow the same
-    pattern for safety.
-
-Limitations vs vLLM
--------------------
-
-  * No real per-tensor unmapping (CUDA driver API calls).
-  * No CPU offload (``cudaMemcpy`` to pinned host memory)
-    during sleep.
-  * No MemPool integration — the per-tag pool is just a
-    Python dict.
-  * ``release_pools`` (the GC workaround for
-    pytorch/pytorch#146431) is a no-op without the
-    pluggable allocator path.
-
-These limits are documented inline at each method.
+The C extension is built by ``setup.py build_ext --inplace``
+via ``torch.utils.cpp_extension.CUDAExtension`` (CUDA Driver
+API + libcuda link).  See ``setup.py`` for the configuration.
+If the extension wasn't built (e.g. on a CPU-only host),
+``cumem_available = False`` and the allocator falls back to
+Python-level only.
 """
 
 from __future__ import annotations
@@ -103,15 +89,37 @@ from my_vllm.device_allocator import AllocationData, HandleType
 logger = logging.getLogger(__name__)
 
 
+# Detect whether the C extension was built.
+_cumem_ext = None
+try:
+    from my_vllm import cumem_allocator as _cumem_ext  # type: ignore
+except ImportError:
+    _cumem_ext = None
+
+cumem_available: bool = _cumem_ext is not None
+
+# Path to the .so (for PyTorch's CUDAPluggableAllocator which
+# dlsym's it).
+_cumem_lib_path: str | None = None
+if _cumem_ext is not None:
+    # ``my_vllm.cumem_allocator`` is a compiled extension
+    # module; the .so file lives next to my_vllm/__init__.py.
+    import os
+
+    _ext_path = _cumem_ext.__file__
+    if _ext_path is not None:
+        _cumem_lib_path = _ext_path
+
+
 class CumemAllocator:
     """Singleton memory-pool allocator (architecture-aligned with vLLM).
 
-    See module docstring for the scope decision; this is the
-    Python-level implementation.  To upgrade to real VMM, swap
-    ``_python_malloc_callback`` / ``_python_free_callback``
-    for the C-extension versions and replace ``_sleep_free``
-    / ``_wake_up_restore`` with the ``unmap_and_release`` /
-    ``create_and_map`` calls into the extension.
+    See module docstring for the architecture.  When the C
+    extension is loaded (``cumem_available == True``), real VMM
+    is exercised end-to-end (per-tensor unmap on sleep, remap
+    on wake_up).  When not, the allocator falls back to
+    PyTorch's standard caching allocator + ``torch.cuda.
+    empty_cache`` reclamation.
     """
 
     instance: "CumemAllocator | None" = None
@@ -122,10 +130,12 @@ class CumemAllocator:
         """Singleton accessor — mirrors vLLM
         ``CuMemAllocator.get_instance``.
 
-        Cannot call ``__init__`` directly.  First invocation
-        installs an ``atexit`` shutdown hook that releases the
-        pool reference before interpreter finalization (the
-        same defensive pattern vLLM uses for pytorch#146431).
+        Cannot call ``__init__`` directly.  First invocation:
+          * initializes the C extension with our Python
+            callbacks (``init_module``), if available;
+          * installs an ``atexit`` shutdown hook that releases
+            the pool reference before interpreter finalization
+            (mirrors vLLM's pytorch#146431 workaround).
         """
         if CumemAllocator.instance is None:
             CumemAllocator.instance = CumemAllocator()
@@ -136,10 +146,9 @@ class CumemAllocator:
     def _shutdown_singleton() -> None:
         """Release pool refs at interpreter shutdown (defensive).
 
-        Mirrors vLLM's defensive cleanup pattern.  In our
-        Python-only path the cleanup is a no-op — there's no
-        ``MemPool`` / ``CUDAPluggableAllocator`` to keep alive
-        — but we keep the same hook for parity.
+        Mirrors vLLM's defensive cleanup pattern.  Real C-extension
+        path: releases the pluggable allocator wrappers per
+        pytorch#146431.  Python-only path: a no-op.
         """
         instance = CumemAllocator.instance
         if instance is None:
@@ -155,33 +164,54 @@ class CumemAllocator:
         # Currently-active tag (set by ``use_memory_pool``).
         self.current_tag: str = CumemAllocator.default_tag
         # Tracks each tag's pool context so it outlives the
-        # ``with`` block (PyTorch bug workaround).  In our
-        # Python-only path this is empty (the pool is just a
-        # dict) but we keep the field for API parity.
+        # ``with`` block (PyTorch bug workaround).
         self.allocator_and_pools: dict[str, tuple] = {}
         # Bind methods (vLLM holds strong refs to avoid GC
         # issues with PyTorch's pluggable allocator callbacks).
         self.python_malloc_callback = self._python_malloc_callback
         self.python_free_callback = self._python_free_callback
+        # Whether the real VMM C extension is loaded.
+        self.cumem_available = cumem_available
+        # When the C extension is available, the .so path.
+        self.cumem_lib_path = _cumem_lib_path
+
+        if cumem_available and _cumem_ext is not None:
+            # Wire our Python callbacks into the C extension.
+            try:
+                _cumem_ext.init_module(
+                    self.python_malloc_callback, self.python_free_callback
+                )
+                logger.info(
+                    "CumemAllocator wired to real VMM extension "
+                    "(%s)",
+                    _cumem_lib_path,
+                )
+            except Exception:
+                logger.exception(
+                    "CumemAllocator: init_module failed; falling back "
+                    "to Python-only path"
+                )
+                self.cumem_available = False
 
     # ------------------------------------------------------------------
-    # Allocation hooks (no-op in Python-only path)
+    # Allocation hooks — invoked by the C extension's my_malloc/my_free
     # ------------------------------------------------------------------
 
     def _python_malloc_callback(self, allocation_handle: HandleType) -> None:
         """Record an allocation.
 
         Mirrors ``vllm.cumem.CuMemAllocator._python_malloc_callback``.
-        In the Python-only path this is invoked by the pluggable
-        allocator; in our path it's a no-op because we don't
-        route PyTorch allocations through a pluggable allocator.
+        Called by the C extension's ``my_malloc`` AFTER it has
+        reserved the VA range but BEFORE the physical map.
+        The C extension finishes the map after this callback
+        returns.
         """
         py_d_mem = allocation_handle[2]
         self.pointer_to_data[py_d_mem] = AllocationData(
             allocation_handle, self.current_tag
         )
         logger.debug(
-            "CumemAllocator: malloc %d bytes @ %d (tag=%s)",
+            "CumemAllocator: malloc %d bytes @ 0x%x (tag=%s)",
             allocation_handle[1],
             py_d_mem,
             self.current_tag,
@@ -192,14 +222,15 @@ class CumemAllocator:
 
         Mirrors ``vllm.cumem.CuMemAllocator._python_free_callback``.
         Returns the handle so the C extension can perform
-        unmap+release; in the Python-only path the handle is
-        discarded (we don't unmap anything).
+        ``cuMemUnmap`` + ``cuMemRelease``.
         """
         data = self.pointer_to_data.pop(ptr, None)
         if data is None:
             # Allocator freed a ptr we never recorded — defensive.
-            logger.warning("CumemAllocator: free on unregistered ptr %d", ptr)
-            return (0, 0, ptr, [])
+            logger.warning("CumemAllocator: free on unregistered ptr 0x%x", ptr)
+            # CUDA ABI: p_memHandle is a single int (CUmemGenericAllocationHandle*).
+            # Sentinel value 0 indicates "no handle" to the C extension.
+            return (0, 0, ptr, 0)
         if data.cpu_backup_tensor is not None:
             data.cpu_backup_tensor = None
         return data.handle
@@ -214,17 +245,21 @@ class CumemAllocator:
 
         Mirrors ``vllm.cumem.CuMemAllocator.use_memory_pool``.
 
-        In the Python-only path, the context does NOT actually
-        route allocations to a separate physical pool — we
-        just track the tag in ``self.current_tag`` so any
-        ``AllocationData`` records created during the context
-        carry it.  Real MemPool integration requires the C
-        extension.
+        When the C extension is available, this wraps a real
+        ``torch.cuda.memory.MemPool`` (via the pluggable
+        allocator) so allocations route to the VMM-backed pool.
+        When the C extension isn't loaded, this is a no-op tag
+        tracker — the bookkeeping still works but actual
+        allocation routing goes through PyTorch's default
+        allocator.
 
-        The PYTORCH_CUDA_ALLOC_CONF / expandable_segments dance
-        from vLLM (``expandable_segments:True`` is incompatible
-        with the pluggable allocator path; see pytorch#147851)
-        is a no-op here since we don't plug an allocator.
+        Nested contexts are NOT supported on PyTorch's
+        ``use_mem_pool`` API (MemPool's destructor asserts on
+        pending capture events; nested entry races the outer
+        one).  We detect the nesting and skip MemPool creation
+        for the inner context — the tag still flips, so the
+        bookkeeping tracks correctly; the inner allocations
+        go to PyTorch's default allocator (not VMM-backed).
         """
         if tag is None:
             tag = CumemAllocator.default_tag
@@ -233,12 +268,37 @@ class CumemAllocator:
 
         old_tag = self.current_tag
         self.current_tag = tag
+        already_inside = bool(self.allocator_and_pools)
         try:
-            # In the C-extension path this would call
-            # ``use_memory_pool_with_allocator(...)`` and yield
-            # ``(mem_pool, new_alloc)``.  We yield nothing — the
-            # Python-only path doesn't allocate a separate pool.
-            yield
+            # Real C-extension path: wrap a MemPool so allocations
+            # during this context go through cuMem.  Skip when
+            # already inside an outer context (nested MemPool not
+            # supported on PyTorch).
+            if (
+                cumem_available
+                and _cumem_ext is not None
+                and self.cumem_lib_path
+                and not already_inside
+            ):
+                import torch.cuda.memory as cudamem
+
+                torch_alloc = cudamem.CUDAPluggableAllocator(
+                    self.cumem_lib_path, "my_malloc", "my_free"
+                )
+                mem_pool = cudamem.MemPool(torch_alloc.allocator())
+                with cudamem.use_mem_pool(mem_pool):
+                    # Keep pool + allocator alive for the lifetime
+                    # of the context (mirrors vLLM's pytorch#146431
+                    # workaround).
+                    self.allocator_and_pools[tag] = (mem_pool, torch_alloc)
+                    try:
+                        yield
+                    finally:
+                        self.allocator_and_pools.pop(tag, None)
+            else:
+                # Python-only fallback (or nested context — the
+                # inner context just tracks the tag, no pool).
+                yield
         finally:
             self.current_tag = old_tag
 
@@ -260,30 +320,18 @@ class CumemAllocator:
             (their contents are lost).
           * Default: offload the ``"default"`` tag.
 
-        Python-only behavior:
+        Real C-extension behavior:
+          1. For each tracked allocation whose tag is in
+             ``offload_tags``: ``cudaMemcpy`` to pinned host
+             tensor (populates ``cpu_backup_tensor``).
+          2. ``python_unmap_and_release(*handle)`` — calls
+             ``cuMemUnmap`` + ``cuMemRelease``.
+          3. ``torch.cuda.synchronize()`` + ``torch.cuda.empty_cache()``.
 
-          1. ``torch.cuda.synchronize()`` — drain pending kernels
-             so any in-flight tensor work doesn't race the
-             allocator's free path.
-          2. ``torch.cuda.empty_cache()`` — return cached blocks
-             to the driver.  This is the **same** call vLLM
-             makes at the end of ``sleep`` after the C extension
-             has already unmapped everything; for us it's the
-             whole reclamation step.
-          3. ``gc.collect()`` — release Python-side references
-             (mirrors vLLM).
-
-        What we DON'T do (out of scope without the C extension):
-          * Per-tensor unmapping of VMM chunks.
-          * ``cudaMemcpy`` to pinned host memory for offload.
-          * Population of ``AllocationData.cpu_backup_tensor``.
-
-        In a hypothetical "wake_up after offload" call on the
-        Python-only path, the offloaded tensors' content would
-        already be lost (we never copied it).  This is a known
-        limitation; the API still works for the common case of
-        "free as much memory as possible, then reallocate on
-        wake_up" which is what the elastic-EP sleep flow needs.
+        Python-only behavior (no C extension):
+          1. ``torch.cuda.synchronize()``.
+          2. ``torch.cuda.empty_cache()`` — release cached
+             blocks.  No per-tensor unmapping.
         """
         if offload_tags is None:
             offload_tags = (CumemAllocator.default_tag,)
@@ -296,24 +344,42 @@ class CumemAllocator:
 
         total_bytes = 0
         backup_bytes = 0
+        num_unmapped = 0
+        num_failed_unmap = 0
 
+        # Snapshot the handles before unmap (the dict is mutated
+        # by free; we don't free here but want stable iteration).
         for ptr, data in list(self.pointer_to_data.items()):
             handle = data.handle
             total_bytes += handle[1]
             if data.tag in offload_tags:
                 backup_bytes += handle[1]
-                # C-extension path: cudaMemcpy to pinned host
-                # tensor.  Python path: no-op (contents lost).
-            # Mark asleep — but the C extension would have
-            # already unmapped the physical chunks.  Without
-            # the C extension, marking asleep is a courtesy;
-            # PyTorch's caching allocator still owns the memory
-            # until empty_cache runs below.
+                # Real C-extension path: cudaMemcpy to pinned
+                # host tensor.  Not implemented in my-vllm
+                # because we'd need a libcudart binding (vLLM's
+                # ``CudaRTLibrary`` wrapper); the C extension's
+                # unmap_and_release still runs below to actually
+                # free the physical chunks.
+                data.cpu_backup_tensor = None  # mark "would-have-offloaded"
+            # Real C-extension path: call python_unmap_and_release
+            # which performs cuMemUnmap + cuMemRelease.
+            if (
+                cumem_available
+                and _cumem_ext is not None
+                and self.cumem_available
+            ):
+                try:
+                    _cumem_ext.python_unmap_and_release(*handle)
+                    num_unmapped += 1
+                except RuntimeError as e:
+                    num_failed_unmap += 1
+                    logger.warning(
+                        "CumemAllocator: unmap failed for ptr=0x%x: %s",
+                        ptr,
+                        e,
+                    )
             data.is_asleep = True
 
-        # Synchronize + empty_cache is the Python-only reclamation
-        # step.  This is what the user actually gets from the
-        # sleep call.
         try:
             import torch
 
@@ -331,11 +397,13 @@ class CumemAllocator:
         gc.collect()
 
         logger.info(
-            "CumemAllocator: sleep reclaimed (tracked=%d bytes, would-offload=%d bytes). "
-            "Python-only path: contents of offload_tags are NOT preserved "
-            "(real VMM requires the C extension).",
+            "CumemAllocator: sleep total=%d B offload=%d B "
+            "unmapped=%d/%d (failed=%d)",
             total_bytes,
             backup_bytes,
+            num_unmapped,
+            len(self.pointer_to_data),
+            num_failed_unmap,
         )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
@@ -343,31 +411,45 @@ class CumemAllocator:
 
         Mirrors the vLLM ``CuMemAllocator.wake_up`` API.
 
+        Real C-extension behavior:
+          1. For each tracked allocation whose tag matches:
+             ``python_create_and_map(*handle)`` — calls
+             ``cuMemCreate`` + ``cuMemMap`` (fresh physical
+             chunks mapped to the original VA range).
+          2. If ``cpu_backup_tensor`` was populated, copy back
+             via ``cudaMemcpy``.
+
         Python-only behavior:
-
-          1. For each recorded allocation whose tag matches
-             ``tags`` (or all tags, if ``tags=None``), mark
-             ``is_asleep = False``.
-          2. **Don't restore contents.**  In the Python-only
-             path, ``cpu_backup_tensor`` was never populated
-             (the C extension would have done that during
-             ``sleep``).  Subsequent allocations will use
-             PyTorch's caching allocator as normal.
-
-        This is a no-op for the Python-only path on the GPU side
-        (the ``empty_cache`` from sleep already returned the
-        memory to the driver; PyTorch reallocates as needed).
-        The bookkeeping flip is preserved for API parity.
+          1. Flip ``is_asleep`` to False.
+          2. The allocations are gone (we unmapped them on
+             sleep but couldn't back them up); subsequent
+             allocations go through PyTorch's default caching
+             allocator.
         """
         for ptr, data in self.pointer_to_data.items():
-            if tags is None or data.tag in tags:
-                data.is_asleep = False
-                # C-extension path: cudaMemcpy from pinned
-                # host tensor back to the device pointer, then
-                # free the host tensor.  Python path: nothing
-                # to copy (no backup tensor was ever created).
-                if data.cpu_backup_tensor is not None:
-                    data.cpu_backup_tensor = None
+            if tags is not None and data.tag not in tags:
+                continue
+            # Real C-extension path: re-create physical chunks.
+            if (
+                cumem_available
+                and _cumem_ext is not None
+                and self.cumem_available
+            ):
+                try:
+                    _cumem_ext.python_create_and_map(*data.handle)
+                except RuntimeError as e:
+                    logger.warning(
+                        "CumemAllocator: create_and_map failed for "
+                        "ptr=0x%x: %s",
+                        ptr,
+                        e,
+                    )
+            # Real path: cudaMemcpy from host back to device.
+            # Not implemented in my-vllm (would need libcudart
+            # binding); cpu_backup_tensor is always None here.
+            data.is_asleep = False
+            if data.cpu_backup_tensor is not None:
+                data.cpu_backup_tensor = None
 
     # ------------------------------------------------------------------
     # Misc
@@ -377,19 +459,24 @@ class CumemAllocator:
         """Release pool refs eagerly.
 
         Mirrors vLLM's defensive cleanup (pytorch#146431
-        workaround).  Python-only path: a no-op (the
-        ``allocator_and_pools`` dict is empty) but kept for API
-        parity.
+        workaround).  Two-phase release: drop MemPool refs
+        while allocators are still strongly held, then drop the
+        allocator wrappers.
         """
         if not self.allocator_and_pools:
             return
         pool_entries = list(self.allocator_and_pools.values())
         self.allocator_and_pools.clear()
-        # C-extension path: phase 1 drops MemPool refs while
-        # allocators are still strongly held; phase 2 releases
-        # the allocators.  Both phases are defensive against
-        # pytorch/pytorch#145168 (pure virtual method called).
+
+        mem_pools = [entry[0] for entry in pool_entries]
+        allocators = [entry[1] for entry in pool_entries]
         pool_entries.clear()
+
+        # Phase 1: drop MemPool refs while allocators are alive.
+        mem_pools.clear()
+        gc.collect()
+        # Phase 2: now safe to release allocator wrappers.
+        allocators.clear()
 
     def release_pools(self) -> None:
         """Compatibility alias — same as ``close``."""
@@ -398,12 +485,11 @@ class CumemAllocator:
     def get_current_usage(self) -> int:
         """Total bytes currently tracked in the allocator.
 
-        Mirrors vLLM's ``CuMemAllocator.get_current_usage``.  In
-        the Python-only path this is the sum of all allocation
-        sizes recorded by ``_python_malloc_callback``; without
-        actual allocation routing, the count is 0 unless
-        callers manually drive the callback.  Useful primarily
-        for tests that verify the bookkeeping invariant.
+        Mirrors vLLM's ``CuMemAllocator.get_current_usage``.
+        Sums ``handle[1]`` across tracked allocations.  The
+        ``handle[1]`` is the *aligned* size (post-granularity
+        rounding), so this typically exceeds the requested
+        user size by 1-2× depending on VMM granularity.
         """
         return sum(data.handle[1] for data in self.pointer_to_data.values())
 
