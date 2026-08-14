@@ -123,8 +123,22 @@ class CudaCommunicator(DeviceCommunicatorBase):
         )
 
     def all_reduce(self, input_: torch.Tensor) -> torch.Tensor:
+        """All-reduce.
+
+        C241: prefers the NVLS-backed
+        :class:`SymmMemCommunicator` when the symmetric-memory
+        runtime is available, the input dtype / size is eligible,
+        and a ``SymmMemCommunicator`` instance is bound to this
+        communicator.  Falls back to ``GroupCoordinator.all_reduce``
+        (or ``torch.distributed.all_reduce``) otherwise.
+        """
         if self.world_size == 1:
             return input_
+        symm = getattr(self, "_symm_mem_communicator", None)
+        if symm is not None and not symm.disabled:
+            out = symm.all_reduce(input_)
+            if out is not None:
+                return out
         if self.group_coordinator is not None:
             return self.group_coordinator.all_reduce(input_)
         dist.all_reduce(input_, group=self.device_group)
@@ -147,3 +161,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
         if self.group_coordinator is not None:
             return self.group_coordinator.all_gather(input_, dim=dim)
         return super().all_gather(input_, dim=dim)
+
+    def attach_symm_mem(
+        self, symm_mem_communicator: "SymmMemCommunicator | None",
+    ) -> None:
+        """Bind (or clear) the optional ``SymmMemCommunicator``.
+
+        When bound, ``all_reduce`` will try the NVLS path first
+        before falling back to the standard NCCL/Gloo path.  Pass
+        ``None`` to clear.
+        """
+        self._symm_mem_communicator = symm_mem_communicator

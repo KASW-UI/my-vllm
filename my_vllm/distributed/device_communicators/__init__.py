@@ -1,6 +1,8 @@
 """my_vllm/distributed/device_communicators — Per-device communication primitives.
 
 C240: introduced for the All-to-All (MoE EP) path.
+C241: adds ``SymmMemCommunicator`` — NVLS-accelerated collectives
+via ``torch.distributed._symmetric_memory``.
 
 Mirrors ``vllm/distributed/device_communicators/`` but ships only the
 CUDA pieces used by ``AgRsAll2AllManager`` (NCCL/Gloo all-gather +
@@ -22,7 +24,13 @@ Public surface
     / ``reduce_scatterv``).
   * ``cuda_communicator.CudaCommunicator`` — CUDA-backed
     ``DeviceCommunicatorBase`` that delegates to ``GroupCoordinator``
-    (NCCL/Gloo) for the actual collectives.
+    (NCCL/Gloo) for the actual collectives.  C241: optionally uses
+    ``SymmMemCommunicator`` for the all-reduce fast path when NVLS
+    is available.
+  * ``symm_mem.SymmMemCommunicator`` — NVLS-accelerated all-reduce
+    via ``torch.distributed._symmetric_memory``.
+  * ``all_reduce_utils`` — sizing tables + ``should_nccl_symm_mem_*``
+    selection heuristics.
 """
 
 from __future__ import annotations
@@ -38,6 +46,13 @@ from my_vllm.distributed.device_communicators.all2all import (
     MoriAll2AllManager,
     NixlEPAll2AllManager,
 )
+from my_vllm.distributed.device_communicators.all_reduce_utils import (
+    CUSTOM_ALL_REDUCE_MAX_SIZES,
+    NCCL_SYMM_MEM_ALL_REDUCE_CONFIG,
+    SYMM_MEM_ALL_REDUCE_MAX_SIZES,
+    should_nccl_symm_mem_ag_rs,
+    should_nccl_symm_mem_allreduce,
+)
 from my_vllm.distributed.device_communicators.base_device_communicator import (
     All2AllManagerBase,
     Cache,
@@ -46,11 +61,17 @@ from my_vllm.distributed.device_communicators.base_device_communicator import (
 from my_vllm.distributed.device_communicators.cuda_communicator import (
     CudaCommunicator,
 )
+from my_vllm.distributed.device_communicators.symm_mem import (
+    SymmMemCommunicator,
+    is_symmetric_memory_available,
+)
 
 
 __all__ = [
     "All2AllManagerBase",
     "Cache",
+    "CudaCommunicator",
+    "CUSTOM_ALL_REDUCE_MAX_SIZES",
     "DeviceCommunicatorBase",
     "AgRsAll2AllManager",
     "DeepEPAll2AllManagerBase",
@@ -61,5 +82,10 @@ __all__ = [
     "FlashInferNVLinkTwoSidedAll2AllManager",
     "MoriAll2AllManager",
     "NixlEPAll2AllManager",
-    "CudaCommunicator",
+    "NCCL_SYMM_MEM_ALL_REDUCE_CONFIG",
+    "SYMM_MEM_ALL_REDUCE_MAX_SIZES",
+    "SymmMemCommunicator",
+    "is_symmetric_memory_available",
+    "should_nccl_symm_mem_ag_rs",
+    "should_nccl_symm_mem_allreduce",
 ]
