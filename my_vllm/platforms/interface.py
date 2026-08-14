@@ -381,7 +381,36 @@ class Platform:
         return None
 
     def is_cumem_allocator_available(self) -> bool:
-        return False
+        """Return True if the CUDA Virtual Memory Management (VMM)
+        API is available on this platform's GPU.
+
+        Mirrors vLLM ``Platform.is_cumem_allocator_available``
+        (vllm/platforms/cuda.py).  The cumem API was introduced
+        in CUDA 11.2 (driver >= 470) and is supported on every
+        NVIDIA GPU with SM >= 7.0 (Volta+).  RTX 4060 (sm_89)
+        and H100 (sm_90) both qualify.
+
+        C231: this returns True for the CUDA platform when
+        ``torch.cuda.is_available()`` AND the device supports
+        VMM (any CUDA GPU since Volta).  The actual VMM
+        driver-API calls still require the C extension
+        (``libcumem_allocator.so``) which my-vllm does not
+        vendor; see ``my_vllm.device_allocator.cumem`` for the
+        Python-level fallback.
+        """
+        if not self.is_cuda_alike():
+            return False
+        try:
+            import torch
+
+            if not torch.cuda.is_available():
+                return False
+            cap = torch.cuda.get_device_capability()
+            sm_major, _ = cap
+            # VMM requires SM >= 7.0 (Volta+).
+            return sm_major >= 7
+        except Exception:
+            return False
 
     def get_attn_backend_for_batch(
         self, attn_backend, common_attn_metadata
