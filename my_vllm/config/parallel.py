@@ -51,6 +51,12 @@ class ParallelConfig:
     pipeline_parallel_size: int = 1
     expert_parallel_size: int = 1
     context_parallel_size: int = 1
+    decode_context_parallel_size: int = 1
+    """C257: decode-side context-parallel size (mirrors vLLM
+    ``ParallelConfig.decode_context_parallel_size``). The
+    SimpleCPUOffloadScheduler multiplies per-group block sizes by
+    this when computing the FA-group block_size used for prefix-cache
+    alignment."""
     data_parallel_size: int = 1
     """Number of data-parallel replicas.  Mirrors vLLM
     ``ParallelConfig.data_parallel_size``.  Mutated at runtime by

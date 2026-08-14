@@ -179,6 +179,28 @@ class FreeKVCacheBlockQueue:
         self.fake_free_list_tail.prev_free_block = self.fake_free_list_head
         self.num_free_blocks = 0
 
+    def iter_blocks_after(
+        self, last_block: "KVCacheBlock | None"
+    ):
+        """Yield each block starting after ``last_block``.
+
+        Mirrors vLLM V1 FreeKVCacheBlockQueue.iter_blocks_after(): used by
+        C257 SimpleCPUOffloadScheduler to single-pass walk the GPU free
+        queue from a cursor and offload blocks near eviction. ``last_block``
+        is the most recently visited block (its ``next_free_block`` is the
+        starting point).  Passing ``None`` starts from the head.
+
+        Callers wrap with ``enumerate()`` to get a 0-based counter.
+        """
+        if last_block is None:
+            curr = self.fake_free_list_head.next_free_block
+        else:
+            curr = last_block.next_free_block
+
+        while curr is not self.fake_free_list_tail:
+            yield curr
+            curr = curr.next_free_block
+
     @property
     def is_empty(self) -> bool:
         return self.num_free_blocks == 0

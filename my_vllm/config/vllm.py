@@ -1,7 +1,7 @@
 """VllmConfig — aggregates all sub-configs. Aligns with vLLM vllm/config/vllm.py."""
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from my_vllm.config.cache import CacheConfig
 from my_vllm.config.lora import LoRAConfig
@@ -32,6 +32,16 @@ class VllmConfig:
     speculative_config`` — set to ``SpeculativeConfig(method="ngram",
     num_speculative_tokens=K, ...)`` to enable the n-gram proposer
     (see ``my_vllm.v1.spec_decode.ngram_proposer``)."""
+
+    # C257: KV-cache event publisher config (placeholder). Mirrors
+    # ``VllmConfig.kv_events_config``. The SimpleCPUOffloadScheduler
+    # reads ``enable_kv_cache_events`` to forward to the CPU coordinator.
+    kv_events_config: Any | None = None
+
+    # C257: max in-flight token budget (mirrors ``VllmConfig.
+    # max_in_flight_tokens``). Used by ``get_kv_cache_coordinator`` as
+    # the long-prefill cap.
+    max_in_flight_tokens: int | None = None
 
 
 EngineConfig = VllmConfig

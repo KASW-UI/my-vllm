@@ -4,6 +4,15 @@ from typing import Generic, TypeVar, overload
 T = TypeVar("T")
 
 
+def cdiv(a: int, b: int) -> int:
+    """Ceiling division (mirrors vllm/utils/math_utils.py:cdiv).
+
+    C257 SimpleCPUOffloadScheduler uses this for block-aligned
+    arithmetic (``cdiv(confirmed_tokens, block_size)`` etc.).
+    """
+    return -(a // -b) if b > 0 else (a // b if b != 0 else 0)
+
+
 class ConstantList(Generic[T], Sequence):
     """A read-only list wrapper that raises TypeError on mutation.
 

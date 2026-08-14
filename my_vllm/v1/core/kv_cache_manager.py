@@ -40,6 +40,13 @@ class KVCacheBlocks:
     Mirrors vLLM V1 kv_cache_manager.py:33.
     Flat list of block IDs (single-group case). Hides internal block
     representation from the Scheduler.
+
+    C257: adds ``get_block_ids()`` returning ``tuple[list[int], ...]``
+    (one entry per group; my-vllm is single-group so this wraps the
+    flat list in a 1-tuple) and a ``blocks`` shim returning
+    ``[self]`` so callers can index ``blocks.blocks[gidx]`` for the
+    single-group case. Real multi-group support (HybridKVCacheCoordinator
+    path) lands with the Llama/DeepSeek adapters in a later stage.
     """
 
     block_ids: list[int]
@@ -50,6 +57,25 @@ class KVCacheBlocks:
     @classmethod
     def empty(cls) -> "KVCacheBlocks":
         return cls(block_ids=[])
+
+    def get_block_ids(self) -> tuple[list[int], ...]:
+        """Return block IDs grouped per KV cache group.
+
+        Single-group case: returns ``(self.block_ids,)``. Multi-group
+        case: subclasses / future coordinator wiring returns a tuple
+        of equal-length lists.
+        """
+        return (list(self.block_ids),)
+
+    @property
+    def blocks(self) -> list["KVCacheBlocks"]:
+        """Per-group KVCacheBlocks shim.
+
+        Single-group case: returns ``[self]`` so ``blocks.blocks[gidx]``
+        gives the per-group block-id list. Multi-group case: subclass
+        with per-group KVCacheBlock-like views.
+        """
+        return [self]
 
 
 class KVCacheManager:

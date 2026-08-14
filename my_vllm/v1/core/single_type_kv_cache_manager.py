@@ -854,13 +854,23 @@ class SlidingWindowSpec:  # type: ignore[no-redef]
     deliberately not vendored since sliding-window requires a
     non-Dense model (Llama-family) which is out of scope.
 
+    C257: gains ``sliding_window`` field so SimpleCPUOffloadScheduler
+    can compute the per-request offload target
+    (``cdiv(sliding_window, block_size) + 1`` blocks per group).
+
     Use ``register_kv_cache_spec(SlidingWindowSpec, SlidingWindowManager,
     uniform_type_base_spec=SlidingWindowSpec)`` to plug into the
     registry.
     """
 
-    def __init__(self, block_size: int = 16, **_kwargs) -> None:
+    def __init__(
+        self,
+        block_size: int = 16,
+        sliding_window: int | None = None,
+        **_kwargs,
+    ) -> None:
         self.block_size = block_size
+        self.sliding_window = sliding_window
 
 
 class ChunkedLocalAttentionSpec:  # type: ignore[no-redef]

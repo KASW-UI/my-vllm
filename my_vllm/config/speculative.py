@@ -123,3 +123,18 @@ class SpeculativeConfig:
             f" draft={self.draft_model_path},"
             f" ngram=[{self.prompt_lookup_min}, {self.prompt_lookup_max}])"
         )
+
+    def use_eagle(self) -> bool:
+        """Whether this config uses EAGLE draft-model spec decoding.
+
+        C257: returns True iff ``method`` starts with ``"eagle"``
+        (matches vLLM ``config/speculative.py:SpeculativeConfig.
+        use_eagle`` — EAGLE family: ``eagle``, ``eagle3``,
+        ``deepseek_mtp``, ``mla_proposer``). The
+        SimpleCPUOffloadScheduler reads this to decide whether to
+        disable EAGLE drop in ``find_longest_cache_hit``.
+        """
+        if self.method is None:
+            return False
+        m = str(self.method).lower()
+        return m in {"eagle", "eagle3"} or m.startswith("eagle")

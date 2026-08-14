@@ -227,6 +227,42 @@ class BlockPool:
                 b.set_block_hash(h)
                 self.cached_block_hash_to_block.insert(h, b)
 
+    def get_num_free_blocks(self) -> int:
+        """Return the count of free blocks (mirrors vLLM BlockPool API).
+
+        C257 SimpleCPUOffloadScheduler uses this to bound the number of
+        blocks offloaded per step in lazy mode.
+        """
+        return self.free_block_queue.num_free_blocks
+
+    def take_events(self) -> list[Any]:
+        """Return and clear any pending KV-cache events.
+
+        Mirrors vLLM V1 BlockPool.take_events(): the event publisher
+        (C252) feeds BlockStored/BlockRemoved/AllBlocksCleared into this
+        queue and ``update_state_after_alloc`` / free paths drain it.
+
+        C257 default: returns an empty list (no event queue wired up here;
+        events flow via the C252 ``KVConnectorKVEvents`` collector that
+        the SimpleCPUOffloadScheduler subscribes to).
+        """
+        return []
+
+    def reset_prefix_cache(self) -> bool:
+        """Clear all prefix-cache hash entries.
+
+        Mirrors vLLM V1 BlockPool.reset_prefix_cache(): invoked by
+        SimpleCPUOffloadScheduler.reset() when both abandoned store /
+        load queues are empty. Returns True if any blocks were evicted
+        (callers may want to know if anything was actually cleared).
+
+        C257 default: returns False (BlockHashToBlockMap.clear_all() is
+        a thin extension).
+        """
+        had_entries = bool(len(self.cached_block_hash_to_block))
+        self.cached_block_hash_to_block._cache.clear()
+        return had_entries
+
     @property
     def num_free(self) -> int:
         return self.free_block_queue.num_free_blocks
