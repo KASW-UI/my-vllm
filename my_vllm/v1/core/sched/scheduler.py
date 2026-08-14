@@ -110,10 +110,15 @@ class Scheduler(SchedulerInterface):
         cached_data = self._make_cached_request_data(new_req_datas)
 
         # 4. Final assembly.
-        return self._assemble_scheduler_output(
+        out = self._assemble_scheduler_output(
             new_req_datas, cached_data,
             num_common_prefix_blocks, preempted_req_ids,
         )
+
+        # 5. C245: AsyncScheduler post-schedule hook (default no-op).
+        self._update_after_schedule(out)
+
+        return out
 
     # ── schedule() pipeline helpers ──────────────────────────────────────
 
@@ -486,6 +491,48 @@ class Scheduler(SchedulerInterface):
         request.status = RequestStatus.WAITING_FOR_REMOTE_KVS
         self.waiting.add_request(request)
 
+    # ── C245 AsyncScheduler hooks (overridden in AsyncScheduler) ────────
+
+    def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
+        """Post-schedule bookkeeping hook.
+
+        Called at the end of ``schedule()`` (after assembly) to let
+        subclasses update request / scheduler state without duplicating
+        the scheduling pipeline.  Default is a no-op; AsyncScheduler
+        overrides to manage ``_spec_token_placeholders`` and
+        ``num_output_placeholders``.
+
+        Args:
+            scheduler_output: The output of this schedule() call.
+                Subclasses may read ``scheduled_spec_decode_tokens``,
+                ``num_spec_tokens_to_schedule``, and
+                ``num_scheduled_tokens`` to decide what to update.
+        """
+
+    def _update_request_with_output(
+        self,
+        request: Request,
+        new_token_ids: list[int],
+    ) -> tuple[list[int], bool]:
+        """Per-request output update hook.
+
+        Called once per request per step from ``update_from_output``.
+        Returns the (possibly-truncated) ``new_token_ids`` list and a
+        ``stopped`` boolean.  Default delegates to the in-line logic in
+        ``update_from_output``; AsyncScheduler overrides to drain
+        ``async_tokens_to_discard`` and decrement
+        ``num_output_placeholders``.
+
+        Args:
+            request: The request whose model output is being applied.
+            new_token_ids: The sampled token ids from the model runner.
+
+        Returns:
+            (new_token_ids, stopped).  ``stopped=True`` indicates the
+            request finished (EOS or max_tokens).
+        """
+        return new_token_ids, False
+
     # ── output processing ───────────────────────────────────────────────
 
     def update_from_output(
@@ -507,13 +554,24 @@ class Scheduler(SchedulerInterface):
             if req is None:
                 continue
 
-            new_tokens: list[int] = []
-            for tok in token_ids:
+            # C245: AsyncScheduler hook — default delegates to the
+            # in-line logic below; AsyncScheduler overrides to drain
+            # ``async_tokens_to_discard`` and decrement
+            # ``num_output_placeholders`` before applying new tokens.
+            new_tokens, _stopped = self._update_request_with_output(
+                req, token_ids,
+            )
+
+            # If the hook already finished the request (e.g. async
+            # token discard path), skip the inline bookkeeping — the
+            # hook is responsible for the right output.  Default hook
+            # returns ``stopped=False``, so we always run the inline
+            # path on the base Scheduler.
+            for tok in new_tokens:
                 if tok == self._EOS_TOKEN_ID:
                     req.status = RequestStatus.FINISHED_STOPPED
                     break
                 req.append_output_token_ids(tok)
-                new_tokens.append(tok)
 
             # Mirrors vllm v1/core/sched/scheduler.py:1240
             # (`request.num_computed_tokens += num_scheduled_token`). Each

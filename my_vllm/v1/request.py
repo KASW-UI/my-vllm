@@ -106,6 +106,19 @@ class Request:
         self.spec_token_ids: list[int] = []
         self.is_prefill_chunk: bool = False
 
+        # C245: async-output bookkeeping fields for AsyncScheduler.
+        # Mirrors vLLM V1 v1/request.py:101-130.  ``num_output_placeholders``
+        # tracks the count of in-flight async output tokens (real ids
+        # pending — used by the async streaming output path); the
+        # scheduler increments this when scheduling, the worker decrements
+        # when the actual token id is produced.  ``async_tokens_to_discard``
+        # counts stale in-flight async output frames that were dropped
+        # by a force-preempt (reset_prefix_cache); the scheduler drains
+        # this counter one stale frame per ``_update_request_with_output``
+        # call.
+        self.num_output_placeholders: int = 0
+        self.async_tokens_to_discard: int = 0
+
         self.events: list = []
         self.stop_reason: int | str | None = None
 

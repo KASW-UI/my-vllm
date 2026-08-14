@@ -68,6 +68,9 @@ class SchedulerOutput:
     list[Request].  EngineCore uses scheduled_new_reqs to identify
     which requests need prefill and scheduled_cached_reqs for decode.
     C038: num_common_prefix_blocks reports per-request prefix cache hit count.
+    C245: scheduled_spec_decode_tokens, num_spec_tokens_to_schedule, and
+    pending_structured_output_tokens fields added for AsyncScheduler
+    (async-output streaming + speculative decoding bookkeeping).
     """
 
     scheduled_new_reqs: list[NewRequestData] = field(default_factory=list)
@@ -81,6 +84,27 @@ class SchedulerOutput:
     preempted_req_ids: set[str] | None = None
     num_common_prefix_blocks: list[int] = field(default_factory=list)
     kv_cache_block_copies: list[KVCacheBlockCopy] | None = None
+
+    # C245: AsyncScheduler async-output + spec-decode bookkeeping.
+    # Mirrors vLLM V1 v1/core/sched/output.py:193.
+
+    scheduled_spec_decode_tokens: dict[str, tuple[int, ...]] = field(
+        default_factory=dict
+    )
+    """Per-request draft/spec token tuples produced by the previous step's
+    speculative decode.  Populated by the worker, read by AsyncScheduler
+    to update ``request.spec_token_ids`` and ``num_output_placeholders``."""
+
+    num_spec_tokens_to_schedule: int = 0
+    """Maximum number of spec/draft tokens the scheduler can schedule per
+    request in the current step.  AsyncScheduler uses this as the
+    placeholder length for ``_spec_token_placeholders``."""
+
+    pending_structured_output_tokens: bool = False
+    """True if any scheduled request needs structured-output token
+    resolution before its placeholder tokens are valid.  AsyncScheduler
+    sets this in ``_update_after_schedule`` based on
+    ``request.use_structured_output`` + ``request.num_output_placeholders``."""
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
