@@ -6,9 +6,38 @@ compatibility matrix.
 C230: adds ``data_parallel_size`` field — required for the elastic EP
 rebalance decision (which sizes the DP group) and matches vLLM
 ``vllm/config/parallel.py:127``.
+
+C240: adds ``all2all_backend`` field + ``All2AllBackend`` enum —
+selects the EP all-to-all backend (``naive`` for AG+RS; the
+vendor-specific backends like ``deepep_high_throughput``,
+``deepep_low_latency``, ``nixl_ep``, ``flashinfer`` are
+declarative-only and not vendored).
 """
 
 from dataclasses import dataclass
+from typing import Literal
+
+
+All2AllBackend = Literal[
+    "none",
+    "naive",
+    "allgather_reducescatter",
+    "deepep_high_throughput",
+    "deepep_low_latency",
+    "deepep_v2",
+    "nixl_ep",
+    "flashinfer",
+    "flashinfer_two_sided",
+    "flashinfer_one_sided",
+    "mori",
+]
+"""Enum-like string set for the All-to-All backend.
+
+Mirrors ``vllm/config/parallel.py:40-53``.  ``naive`` and
+``allgather_reducescatter`` are aliases for the AG+RS path; the
+other values are class shells that ``raise NotImplementedError``
+when wired into a real EP backend (see
+``my_vllm.distributed.device_communicators.all2all``)."""
 
 
 @dataclass
@@ -27,6 +56,42 @@ class ParallelConfig:
     ``ParallelConfig.data_parallel_size``.  Mutated at runtime by
     the elastic EP rebalance controller (C230) — see
     ``my_vllm.distributed.elastic_ep.rebalance``."""
+
+    all2all_backend: All2AllBackend = "none"
+    """C240: backend used for the EP all-to-all collective.
+    ``"none"`` / ``"naive"`` / ``"allgather_reducescatter"``
+    resolve to ``AgRsAll2AllManager`` (the reference AG+RS
+    backend).  Other values are declarative-only; see
+    :data:`All2AllBackend` and
+    ``my_vllm.distributed.device_communicators.all2all``."""
+
+    @property
+    def use_all2all_kernels(self) -> bool:
+        """Whether an All-to-All kernel is needed for this configuration.
+
+        Mirrors the vLLM condition
+        ``parallel_config.data_parallel_size > 1
+        or parallel_config.use_sequence_parallel_moe
+        or (parallel_config.enable_expert_parallel
+            and parallel_config.prefill_context_parallel_size > 1)``
+        simplified for my-vllm: True iff either ``ep_size > 1`` or
+        ``dp_size > 1``.
+        """
+        return (
+            self.expert_parallel_size > 1
+            or self.data_parallel_size > 1
+        )
+
+    @property
+    def use_sequence_parallel_moe(self) -> bool:
+        """True when sequence-parallel MoE is enabled.
+
+        vLLM supports a mode where TP ranks split the activation
+        along the sequence dimension; my-vllm does not vendor this
+        path (returns ``False`` unless explicitly configured via
+        the ``data_parallel_size`` combination).
+        """
+        return False
 
     @property
     def world_size(self) -> int:

@@ -19,6 +19,7 @@ _TP: "GroupCoordinator | None" = None
 _PP: "GroupCoordinator | None" = None
 _DP: "GroupCoordinator | None" = None
 _CP: "GroupCoordinator | None" = None
+_EP: "GroupCoordinator | None" = None
 
 
 class GroupCoordinator:
@@ -130,6 +131,287 @@ class GroupCoordinator:
         tensor = torch.empty(size, dtype=dtype, device=self.device)
         dist.recv(tensor, src=self.ranks[src], group=self.device_group)
         return tensor
+
+    def all_gatherv(
+        self,
+        input_: torch.Tensor | list[torch.Tensor],
+        dim: int = 0,
+        sizes: list[int] | None = None,
+    ) -> torch.Tensor | list[torch.Tensor]:
+        """Variable-size AllGather along ``dim``.
+
+        C240: used by ``AgRsAll2AllManager.dispatch``.  When ``sizes``
+        is uniform across ranks (or ``None``), falls through to the
+        regular all_gather for a faster path; otherwise uses a
+        gather-then-broadcast pattern (gather on rank 0, broadcast
+        to all).  This is correct but not bandwidth-optimal — true
+        all_gatherv uses NCCL ``ncclAllGatherv`` which my-vllm does
+        not vendor at the C-layer; see Phase 5 plan for future
+        acceleration work.
+
+        ``input_`` may be a single tensor or a list of tensors
+        (each gathered along the same ``dim``).
+        """
+        if self.world_size == 1:
+            return input_
+
+        if isinstance(input_, torch.Tensor):
+            tensors = [input_]
+        else:
+            tensors = list(input_)
+
+        if sizes is not None and all(s == sizes[0] for s in sizes):
+            sizes = None
+
+        results: list[torch.Tensor] = []
+        for tensor in tensors:
+            results.append(self._all_gatherv_single(tensor, dim, sizes))
+
+        if isinstance(input_, torch.Tensor):
+            return results[0]
+        return results
+
+    def _all_gatherv_single(
+        self,
+        input_: torch.Tensor,
+        dim: int,
+        sizes: list[int] | None,
+    ) -> torch.Tensor:
+        """Helper for a single-tensor AllGather."""
+        if sizes is None:
+            return self.all_gather(input_, dim=dim)
+
+        assert len(sizes) == self.world_size, (
+            f"len(sizes)={len(sizes)} != world_size={self.world_size}"
+        )
+        assert input_.size(dim) == sizes[self.rank_in_group], (
+            f"local dim-{dim} size {input_.size(dim)} != "
+            f"sizes[rank={self.rank_in_group}]={sizes[self.rank_in_group]}"
+        )
+
+        if dim == 0:
+            return self._all_gatherv_dim0(input_, sizes)
+        return self._all_gatherv_perm(input_, dim, sizes)
+
+    def _all_gatherv_dim0(
+        self, input_: torch.Tensor, sizes: list[int]
+    ) -> torch.Tensor:
+        out_size = (sum(sizes),) + tuple(input_.size()[1:])
+        output = torch.empty(out_size, dtype=input_.dtype, device=input_.device)
+
+        my_offset = sum(sizes[: self.rank_in_group])
+        my_size = sizes[self.rank_in_group]
+        output.narrow(0, my_offset, my_size).copy_(input_.contiguous())
+
+        if self.rank_in_group == 0:
+            for r in range(1, self.world_size):
+                offset = sum(sizes[:r])
+                recv_size = (sizes[r],) + tuple(input_.size()[1:])
+                recv = torch.empty(recv_size, dtype=input_.dtype, device=input_.device)
+                dist.recv(recv, src=self.ranks[r], group=self.device_group)
+                output.narrow(0, offset, sizes[r]).copy_(recv)
+        else:
+            dist.send(
+                input_.contiguous(),
+                dst=self.ranks[0],
+                group=self.device_group,
+            )
+
+        dist.broadcast(output, src=self.ranks[0], group=self.device_group)
+        return output
+
+    def _all_gatherv_perm(
+        self, input_: torch.Tensor, dim: int, sizes: list[int]
+    ) -> torch.Tensor:
+        perm = input_.movedim(dim, 0).contiguous()
+        out_perm = self._all_gatherv_dim0(perm, sizes)
+        return out_perm.movedim(0, dim).contiguous()
+
+    def reduce_scatterv(
+        self,
+        input_: torch.Tensor,
+        dim: int = 0,
+        sizes: list[int] | None = None,
+    ) -> torch.Tensor:
+        """Variable-size ReduceScatter (sum) along ``dim``.
+
+        C240: used by ``AgRsAll2AllManager.combine``.  When ``sizes``
+        is uniform across ranks (or ``None``), uses
+        ``torch.distributed.reduce_scatter_tensor`` (NCCL
+        ``ncclReduceScatter``).  Otherwise uses a gather-then-sum-
+        then-scatter pattern via rank 0 (correct, not
+        bandwidth-optimal — see Phase 5 plan).
+        """
+        if self.world_size == 1:
+            return input_
+
+        if dim < 0:
+            dim += input_.dim()
+        if sizes is not None and all(s == sizes[0] for s in sizes):
+            sizes = None
+
+        if sizes is None:
+            return self._reduce_scatter_uniform(input_, dim)
+
+        assert len(sizes) == self.world_size, (
+            f"len(sizes)={len(sizes)} != world_size={self.world_size}"
+        )
+        assert input_.size(dim) == sum(sizes), (
+            f"input dim-{dim} size {input_.size(dim)} != sum(sizes)={sum(sizes)}"
+        )
+        return self._reduce_scatterv_via_root(input_, dim, sizes)
+
+    def _reduce_scatterv_via_root(
+        self, input_: torch.Tensor, dim: int, sizes: list[int]
+    ) -> torch.Tensor:
+        chunk_size = sizes[self.rank_in_group]
+        out_shape = (chunk_size,) + tuple(input_.size()[1:])
+        if dim == 0:
+            return self._reduce_scatterv_dim0(input_, sizes, out_shape)
+        perm = input_.movedim(dim, 0).contiguous()
+        perm_sizes = [s for s in sizes]
+        perm_chunk_size = chunk_size
+        perm_out_shape = (perm_chunk_size,) + tuple(perm.size()[1:])
+        out_perm = self._reduce_scatterv_dim0(perm, perm_sizes, perm_out_shape)
+        return out_perm.movedim(0, dim).contiguous()
+
+    def _reduce_scatterv_dim0(
+        self,
+        input_: torch.Tensor,
+        sizes: list[int],
+        out_shape: torch.Size,
+    ) -> torch.Tensor:
+        if self.rank_in_group == 0:
+            accumulator = input_.clone().contiguous()
+            for r in range(1, self.world_size):
+                recv = torch.empty_like(input_)
+                dist.recv(recv, src=self.ranks[r], group=self.device_group)
+                accumulator.add_(recv)
+            output = accumulator.narrow(0, 0, sizes[0]).clone()
+        else:
+            dist.send(input_.contiguous(), dst=self.ranks[0], group=self.device_group)
+            output = torch.empty(out_shape, dtype=input_.dtype, device=input_.device)
+
+        dist.broadcast(output, src=self.ranks[0], group=self.device_group)
+        return output
+
+    def _reduce_scatter_uniform(
+        self, input_: torch.Tensor, dim: int
+    ) -> torch.Tensor:
+        """Uniform-size reduce-scatter (sum) via torch primitive.
+
+        Uses ``torch.distributed.reduce_scatter_tensor`` which maps
+        to NCCL ``ncclReduceScatter`` on supported hardware.  This
+        is the fast path: it materialises only the rank-local
+        output slice.
+
+        The ``input_`` is the WORLD-WIDE tensor (each rank holds
+        the full ``world_size * chunk`` tensor); the output is the
+        rank-local slice of shape ``(chunk, ...)``.
+        """
+        if dim < 0:
+            dim += input_.dim()
+        assert input_.size(dim) % self.world_size == 0, (
+            f"input dim-{dim} size {input_.size(dim)} not divisible "
+            f"by world_size={self.world_size}"
+        )
+        chunk = input_.size(dim) // self.world_size
+        out_shape = (chunk,) + tuple(input_.size()[1:])
+
+        if dim == 0:
+            output = torch.empty(out_shape, dtype=input_.dtype, device=input_.device)
+            dist.reduce_scatter_tensor(
+                output, input_.contiguous(),
+                op=dist.ReduceOp.SUM,
+                group=self.device_group,
+            )
+            return output
+        else:
+            perm = input_.movedim(dim, 0).contiguous()
+            out_perm = torch.empty(
+                (chunk,) + tuple(perm.size()[1:]),
+                dtype=input_.dtype,
+                device=input_.device,
+            )
+            dist.reduce_scatter_tensor(
+                out_perm, perm,
+                op=dist.ReduceOp.SUM,
+                group=self.device_group,
+            )
+            return out_perm.movedim(0, dim).contiguous()
+
+    def dispatch_router_logits(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
+        """C240 façade for EP/DP dispatch via router_logits.
+
+        In world_size=1 (the my-vllm default), this is identity.  In
+        a real EP deployment, this routes through ``DeviceCommunicator
+        .dispatch_router_logits`` → ``All2AllManagerBase
+        .dispatch_router_logits`` (e.g. ``AgRsAll2AllManager``).
+        """
+        if self.world_size == 1:
+            if extra_tensors is not None:
+                return hidden_states, router_logits, extra_tensors
+            return hidden_states, router_logits
+        device_communicator = getattr(self, "device_communicator", None)
+        if device_communicator is not None:
+            return device_communicator.dispatch_router_logits(
+                hidden_states, router_logits, is_sequence_parallel, extra_tensors
+            )
+        return hidden_states, router_logits
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
+        """C240 façade for EP/DP dispatch via topk routing.
+
+        World_size=1: identity.  World_size>1: routes through
+        ``DeviceCommunicator.dispatch`` → ``All2AllManagerBase
+        .dispatch`` (e.g. ``AgRsAll2AllManager.dispatch``).
+        """
+        if self.world_size == 1:
+            if extra_tensors is not None:
+                return hidden_states, topk_weights, topk_ids, extra_tensors
+            return hidden_states, topk_weights, topk_ids
+        device_communicator = getattr(self, "device_communicator", None)
+        if device_communicator is not None:
+            return device_communicator.dispatch(
+                hidden_states, topk_weights, topk_ids,
+                is_sequence_parallel, extra_tensors,
+            )
+        return hidden_states, topk_weights, topk_ids
+
+    def combine(
+        self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False,
+    ) -> torch.Tensor:
+        """C240 façade for EP/DP combine (reduce-scatter).
+
+        World_size=1: identity.  World_size>1: routes through
+        ``DeviceCommunicator.combine`` → ``All2AllManagerBase
+        .combine`` (e.g. ``AgRsAll2AllManager.combine``).
+        """
+        if self.world_size == 1:
+            return hidden_states
+        device_communicator = getattr(self, "device_communicator", None)
+        if device_communicator is not None:
+            return device_communicator.combine(hidden_states, is_sequence_parallel)
+        return hidden_states
 
     def destroy(self) -> None:
         if hasattr(self, "device_group"):
@@ -262,6 +544,18 @@ def get_dp_group() -> "GroupCoordinator | None":
     return _DP
 
 
+def get_ep_group() -> "GroupCoordinator | None":
+    """Return the expert-parallel group, or None if not initialized.
+
+    C240: mirrors vLLM V1 ``vllm/distributed/parallel_state.py:
+    get_ep_group``.  The EP group is constructed from ``DP × TP``
+    ranks such that each EP rank owns a disjoint slice of experts
+    (when ``ep_size > 1``).  Returns ``None`` for dense models
+    (no expert parallelism).
+    """
+    return _EP
+
+
 def get_cp_group() -> "GroupCoordinator | None":
     """Return the context-parallel group, or None if not initialized.
 
@@ -362,8 +656,51 @@ def model_parallel_is_initialized() -> bool:
     return _TP is not None
 
 
+def init_expert_parallel(
+    expert_parallel_size: int = 1,
+    tensor_model_parallel_size: int = 1,
+    backend: str = "nccl",
+) -> None:
+    """Initialise the expert-parallel group.
+
+    C240: mirrors vLLM V1 ``init_expert_parallel``.  The EP group
+    is constructed from ``TP × EP`` ranks such that each EP rank
+    owns a disjoint slice of experts (when ``ep_size > 1``).
+
+    For my-vllm's single-process default (``expert_parallel_size
+    <= 1``), this is a no-op — the EP group is not needed for
+    dense inference.
+
+    For multi-process, the EP group is the same as the TP group
+    when ``ep_size == world_size``; the vLLM convention is that
+    each EP replica spans the full TP group.  This simplification
+    matches the my-vllm C230 elastic EP rebalance contract (each
+    "EP rank" is a full TP group).
+    """
+    global _EP
+    if expert_parallel_size <= 1 or not dist.is_initialized():
+        _EP = None
+        return
+    world_size = dist.get_world_size()
+    tp_size = tensor_model_parallel_size
+    assert world_size == expert_parallel_size * tp_size, (
+        f"world_size ({world_size}) != ep_size ({expert_parallel_size}) "
+        f"* tp_size ({tp_size})"
+    )
+    ep_group_ranks = [
+        list(range(r * tp_size, (r + 1) * tp_size))
+        for r in range(expert_parallel_size)
+    ]
+    _EP = GroupCoordinator(
+        group_ranks=ep_group_ranks,
+        local_rank=dist.get_rank() % tp_size,
+        backend=backend,
+        group_name="ep_group",
+    )
+
+
 def destroy_model_parallel() -> None:
-    global _TP, _PP, _DP, _CP
+    global _TP, _PP, _DP, _CP, _EP
     if _TP is not None:
         _TP.destroy()
         _TP = None
@@ -376,6 +713,9 @@ def destroy_model_parallel() -> None:
     if _CP is not None:
         _CP.destroy()
         _CP = None
+    if _EP is not None:
+        _EP.destroy()
+        _EP = None
     if dist.is_initialized():
         dist.destroy_process_group()
 

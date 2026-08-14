@@ -23,24 +23,25 @@ Every file in `my_vllm/` must correspond to a real file in `vllm/`. No invented 
 
 **Previous history**: Stages C000→C098 were implemented under a prior "educational simulation" model. That history is preserved (never squash/rebase). The project now enters a new phase of **engineering alignment** (C110+) — see `Prompt/Engineer-Spec/README.md` for the full specification.
 
-**Current status**: C233. **Phase 1 (硬性 + GPU Runtime 深度, C200-C214) complete**: 7/7 commits closed. **Phase 2 (架构深度 + 加分, C220-C224) complete**: 4/4 done. **Phase 3 (收尾, C230-C233) complete**: 4/4 done — **Phase 1+2+3 closed** ✅.
+**Current status**: C240. **Phase 4 (Distributed Runtime 强化, C240-C249)**: 1/10 commits closed (C240 All-to-All). **Phase 1 (硬性 + GPU Runtime 深度, C200-C214) complete**: 7/7 commits closed. **Phase 2 (架构深度 + 加分, C220-C224) complete**: 4/4 done. **Phase 3 (收尾, C230-C233) complete**: 4/4 done — **Phase 1+2+3 closed** ✅.
 
-**Project metrics (post-Phase 1+2+3)**:
+**Project metrics (post-C240)**:
 
 | Metric                                            | Count                |
 |--------------------------------------------------|----------------------|
-| `my_vllm/` Python files                          | 178                  |
-| `my_vllm/` Python LOC                            | 23,542               |
+| `my_vllm/` Python files                          | 187                  |
+| `my_vllm/` Python LOC                            | 26,046               |
 | `csrc/` C/CUDA files                              | 5 (2 vendored)       |
 | CUDA extensions built by `setup.py`              | 2 (`my_vllm._C` + `my_vllm.cumem_allocator`) |
-| Test files                                       | 59                   |
-| Phase 1+2+3 test pass rate (C200-C232 scope)      | 230 passed + 4 skipped |
-| Engineering notes (`docs/notes/`)                | 8 / 2,589 lines      |
-| Snapshot files (`docs/snapshots/Cxxx.md`)        | 14 (C200-C232 + C233 verification) |
-| Commits tagged                                    | 15 (C200-C233 + prep/tidy) |
+| Test files                                       | 60                   |
+| Phase 1+2+3+4 test pass rate (C200-C240 scope)    | 291 passed + 4 skipped |
+| Engineering notes (`docs/notes/`)                | 9 / 3,063 lines      |
+| Snapshot files (`docs/snapshots/Cxxx.md`)        | 15 (C200-C233 + C240) |
+| Commits tagged                                    | 16 (C200-C233 + C240) |
 | JD hard-skill coverage (excl. K8s)                | ~88-90%              |
 
-**(C222 已删除——CPU 推理不在 JD 范围；"GPU 异构"由 C220 量化 GEMM + C221 fused MoE 完整覆盖)** Cumulative additions since C151:
+**(C222 已删除——CPU 推理不在 JD 范围；"GPU 异构"由 C220 量化 GEMM + C221 fused MoE 完整覆盖)**
+- **C240** — All-to-All 通信算子 (S-level gap, AG+RS backend). `my_vllm/distributed/device_communicators/` (NEW package: `base_device_communicator.py` + `all2all.py` + `cuda_communicator.py`); `AgRsAll2AllManager` 真实实装（dispatch / dispatch_router_logits / combine via NCCL/Gloo AllGather + ReduceScatter），DeepEP HT/LL/V2 / NIXL EP / FlashInfer NVLink / Mori backend class shells。`my_vllm/distributed/parallel_state.py` 扩展 `_EP` group + `get_ep_group()` + `init_expert_parallel()` + `GroupCoordinator.all_gatherv/reduce_scatterv/dispatch/combine` façade。`my_vllm/model_executor/layers/fused_moe/modular_kernel.py` (NEW): `FusedMoEPrepareAndFinalize` ABC + Modular/Monolithic。`my_vllm/model_executor/layers/fused_moe/prepare_finalize/{naive_dp_ep, no_dp_ep}.py` (NEW): NaiveDPEP + NoDPEP concrete prepare/finalize + factory。`my_vllm/model_executor/layers/fused_moe/all2all_utils.py` (NEW): `maybe_make_prepare_finalize()` dispatcher + `get_ep_all2all_manager()`。`my_vllm/model_executor/layers/fused_moe/config.py` 扩展 `use_*_kernels` properties。`my_vllm/config/parallel.py` 扩展 `All2AllBackend` literal + `ParallelConfig.all2all_backend` field。`examples/all2all_benchmark.py` (NEW) + `docs/notes/all2all-overview.md` (NEW, 474 lines) + `tests/test_C240_all2all.py` (NEW, 17 test classes, 61 cases incl. multi-process gloo round-trip via `torch.multiprocessing.spawn`)。
 - **C200** — GPU profiling toolchain + roofline notes (`docs/notes/gpu-profiling.md`, 253 lines). Nsight Compute + roofline methodology established.
 - **C201** — NCCL benchmark + communication principle notes. `examples/nccl_benchmark.py` (384 lines: all_reduce/reduce_scatter/all_gather sweep); `docs/notes/nccl-architecture.md` (363 lines: ring vs tree algorithms, NCCL adaptive routing); `docs/notes/rdma-overview.md` (414 lines: IB Verbs / RoCE / iWARP, NCCL plugin interface).
 - **C210** — `csrc/cache_kernels.cu` upgraded from 1 op (reshape_and_cache, single dtype) to 7 ops (reshape_and_cache, reshape_and_cache_flash, swap_blocks, copy_blocks, cp_gather_cache, convert_fp8, concat_and_cache_mla). All 7 exposed via `my_vllm._C`; Python wrappers in `_custom_ops.py`.
