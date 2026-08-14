@@ -2,6 +2,10 @@
 
 C086: TP×PP×EP×CP combination analysis — topology layout, communication cost model,
 compatibility matrix.
+
+C230: adds ``data_parallel_size`` field — required for the elastic EP
+rebalance decision (which sizes the DP group) and matches vLLM
+``vllm/config/parallel.py:127``.
 """
 
 from dataclasses import dataclass
@@ -18,6 +22,11 @@ class ParallelConfig:
     pipeline_parallel_size: int = 1
     expert_parallel_size: int = 1
     context_parallel_size: int = 1
+    data_parallel_size: int = 1
+    """Number of data-parallel replicas.  Mirrors vLLM
+    ``ParallelConfig.data_parallel_size``.  Mutated at runtime by
+    the elastic EP rebalance controller (C230) — see
+    ``my_vllm.distributed.elastic_ep.rebalance``."""
 
     @property
     def world_size(self) -> int:
@@ -27,6 +36,21 @@ class ParallelConfig:
             * self.expert_parallel_size
             * self.context_parallel_size
         )
+
+    def clone_with_dp_size(self, new_dp_size: int) -> "ParallelConfig":
+        """Return a copy with ``data_parallel_size = new_dp_size``.
+
+        Used by the elastic EP rebalance path to construct the
+        ``new_parallel_config`` for the ``ElasticEPScalingState``
+        without mutating the engine's live config in place.
+        Mirrors the construction in
+        ``vllm/v1/engine/core_client.py:_scale_up_elastic_ep``.
+        """
+        from copy import deepcopy
+
+        clone = deepcopy(self)
+        clone.data_parallel_size = new_dp_size
+        return clone
 
 
 # --- Communication cost model ---

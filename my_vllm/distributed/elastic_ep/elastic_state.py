@@ -110,8 +110,16 @@ class ElasticEPScalingState:
     def progress(self) -> bool:
         """Advance the state machine by one step.
 
-        Returns True if the scaling operation is complete.
+        Returns ``True`` if the state advanced (or we were already
+        at ``COMPLETE``).  Returns ``False`` if blocked (e.g.
+        waiting on a barrier — the real implementation hooks here).
+
+        In vLLM the engine controller loop calls this until it
+        returns ``True`` AND ``is_complete`` is ``True``; the
+        skeleton here always advances (no real barriers yet).
         """
+        if self.is_complete:
+            return True
         if self.scale_type == "scale_up":
             return self._progress_scale_up()
         else:
@@ -135,7 +143,7 @@ class ElasticEPScalingState:
         if idx + 1 >= len(states):
             return True
         self.state = states[idx + 1]
-        return self.state == ScaleUpNewEngineState.COMPLETE
+        return True  # state advanced.
 
     def _progress_scale_up_existing(self) -> bool:
         states = list(ScaleUpExistingEngineState)
@@ -143,7 +151,7 @@ class ElasticEPScalingState:
         if idx + 1 >= len(states):
             return True
         self.state = states[idx + 1]
-        return self.state == ScaleUpExistingEngineState.COMPLETE
+        return True  # state advanced.
 
     def _progress_scale_down_removing(self) -> bool:
         states = list(ScaleDownRemovingEngineState)
@@ -151,7 +159,7 @@ class ElasticEPScalingState:
         if idx + 1 >= len(states):
             return True
         self.state = states[idx + 1]
-        return self.state == ScaleDownRemovingEngineState.COMPLETE
+        return True  # state advanced.
 
     def _progress_scale_down_remaining(self) -> bool:
         states = list(ScaleDownRemainingEngineState)
@@ -159,7 +167,7 @@ class ElasticEPScalingState:
         if idx + 1 >= len(states):
             return True
         self.state = states[idx + 1]
-        return self.state == ScaleDownRemainingEngineState.COMPLETE
+        return True  # state advanced.
 
     @property
     def elapsed_seconds(self) -> float:
