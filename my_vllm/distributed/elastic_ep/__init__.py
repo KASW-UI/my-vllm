@@ -24,6 +24,8 @@ from my_vllm.distributed.elastic_ep.elastic_state import (
     ScaleUpExistingEngineState,
     ScaleUpNewEngineState,
     WorkerType,
+    _default_barrier_fn,
+    _default_weight_transfer_fn,
 )
 from my_vllm.distributed.elastic_ep.rebalance import (
     EPRebalanceDecision,
@@ -47,6 +49,8 @@ __all__ = [
     "ScaleUpNewEngineState",
     "ThresholdEPLoadPolicy",
     "WorkerType",
+    "_default_barrier_fn",
+    "_default_weight_transfer_fn",
     "create_scaling_state_for_decision",
     "decide_and_create",
 ]
