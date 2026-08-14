@@ -316,7 +316,7 @@ class TestFusedMoeTritonE2E:
 
 
 # ---------------------------------------------------------------------------
-# 4. fused_moe dispatcher
+# 4. fused_moe dispatcher — Triton only (no Python fallback)
 # ---------------------------------------------------------------------------
 
 
@@ -346,7 +346,6 @@ class TestFusedMoeDispatcher:
 
         out = fused_moe(
             x=x,
-            experts=None,
             routing_weights=topk_weights,
             expert_indices=topk_ids,
             top_k=top_k,
@@ -357,34 +356,38 @@ class TestFusedMoeDispatcher:
         assert out.shape == (num_tokens, hidden_dim)
         assert torch.isfinite(out).all()
 
-    def test_python_fallback(self, seed):
-        """When experts is provided (no w1/w2), the Python fallback
-        is used (regardless of CUDA availability)."""
-        import torch.nn as nn
+    def test_cpu_input_rejected(self, seed):
+        """CPU input must raise (no CPU fallback path)."""
+        from my_vllm.model_executor.layers.fused_moe.fused_moe import fused_moe
 
-        from my_vllm.model_executor.layers.fused_moe.fused_moe import (
-            ExpertMLP,
-            fused_moe,
-        )
+        x = torch.randn(4, 8, dtype=torch.bfloat16)  # CPU by default
+        w1 = torch.randn(2, 16, 8, dtype=torch.bfloat16)
+        w2 = torch.randn(2, 8, 8, dtype=torch.bfloat16)
+        topk_weights = torch.ones(4, 2, dtype=torch.float32)
+        topk_ids = torch.zeros(4, 2, dtype=torch.int32)
+        with pytest.raises(RuntimeError, match="CUDA"):
+            fused_moe(
+                x=x,
+                routing_weights=topk_weights,
+                expert_indices=topk_ids,
+                top_k=2,
+                w1=w1,
+                w2=w2,
+                num_experts=2,
+            )
 
-        torch.manual_seed(0)
-        num_tokens, hidden_dim, inter_dim = 8, 16, 32
-        top_k = 2
-        num_experts = 3
+    def test_missing_weights_rejected(self, seed):
+        """If w1/w2/num_experts are not all provided, raise (no
+        per-expert nn.Module fallback)."""
+        from my_vllm.model_executor.layers.fused_moe.fused_moe import fused_moe
 
-        x = torch.randn(num_tokens, hidden_dim, device="cuda", dtype=torch.float32)
-        experts = nn.ModuleList([
-            ExpertMLP(hidden_dim, inter_dim).cuda()
-            for _ in range(num_experts)
-        ])
-        topk_weights = torch.ones(num_tokens, top_k, device="cuda", dtype=torch.float32)
-        topk_ids = torch.randint(0, num_experts, (num_tokens, top_k),
-                                 device="cuda", dtype=torch.int32)
-
-        out = fused_moe(
-            x=x, experts=experts,
-            routing_weights=topk_weights, expert_indices=topk_ids,
-            top_k=top_k,
-        )
-        assert out.shape == (num_tokens, hidden_dim)
-        assert torch.isfinite(out).all()
+        x = torch.randn(4, 8, device="cuda", dtype=torch.bfloat16)
+        topk_weights = torch.ones(4, 2, device="cuda", dtype=torch.float32)
+        topk_ids = torch.zeros(4, 2, device="cuda", dtype=torch.int32)
+        with pytest.raises(RuntimeError, match="flat expert weights"):
+            fused_moe(
+                x=x,
+                routing_weights=topk_weights,
+                expert_indices=topk_ids,
+                top_k=2,
+            )
