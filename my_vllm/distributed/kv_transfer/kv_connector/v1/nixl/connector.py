@@ -231,7 +231,12 @@ class NixlBaseConnector(KVConnectorBase_V1):
         return 0
 
     def request_finished(self, request: Any, block_ids: Any) -> None:
-        """Cleanup transfer state when request finishes."""
+        """Cleanup transfer state when request finishes.
+
+        C251: the C251 base default also clears the KV index +
+        failure tracker.  We call ``super().request_finished()``
+        after the local cleanup so both layers stay in sync.
+        """
         rid = (
             request.request_id
             if hasattr(request, "request_id")
@@ -240,6 +245,8 @@ class NixlBaseConnector(KVConnectorBase_V1):
         self._kv_loaded_flags.pop(rid, None)
         self._acks.pop(rid, None)
         self._transfer_start.pop(rid, None)
+        # C251 hook: also clean up the KV index + failure tracker.
+        super().request_finished(request, block_ids)
 
     def shutdown(self) -> None:
         """Release connector state."""
