@@ -23,11 +23,18 @@ Every file in `my_vllm/` must correspond to a real file in `vllm/`. No invented 
 
 **Previous history**: Stages C000→C098 were implemented under a prior "educational simulation" model. That history is preserved (never squash/rebase). The project now enters a new phase of **engineering alignment** (C110+) — see `Prompt/Engineer-Spec/README.md` for the full specification.
 
-**Current status**: C151. All alignment phases + LoRA专项 complete (55/55 items closed); follow-up wire-ups 4/4 done; cleanup phase A (out-of-JD scope) closed. KV cache hierarchy mirrors vLLM (Manager → Coordinator → SingleTypeKVCacheManager → FullAttentionManager). KV transfer migrated to vLLM-canonical `distributed/.../v1/base.py` with `KVConnectorFactory` + `ExampleConnector`. Scheduler has 3-level pipeline + utils + AsyncScheduler skeleton. FP8 KV cache end-to-end: `kv_cache_dtype=fp8_e4m3` allocates the cache in `float8_e4m3fn`, `reshape_and_cache_flash` takes the FP8 path with per-tensor K/V scales (C149). Multi-process NCCL end-to-end: `init_distributed_environment` + canonical `Worker.init_device` sequence + `MultiprocExecutor._init_executor` exports `MASTER_ADDR`/`MASTER_PORT`/`WORLD_SIZE` env vars (C150). LoRA Dense-Linear forward path end-to-end runnable. `update_lora_modules()` wraps OPTForCausalLM targets (C147). `GPUModelRunner` inherits `LoRAModelRunnerMixin` and `_set_active_lora()` activates the per-step adapter inside `execute_model` (C148). Out-of-JD scope pruned (C151): Ray executor / Ray utils / OpenAI api_server / `examples/server.py` / `deploy/` (K8s + autoscaling) deleted; `my_vllm/` no longer references any of these. Invented-file count: 0. See `docs/snapshots/C151.md` for closure write-up.
+**Current status**: C214. **Phase 1 (硬性 + GPU Runtime 深度, C200-C214) complete**: 7/7 commits closed. Phase 2 (架构深度 + 加分, C220-C224) and Phase 3 (收尾, C230-C233) still pending. Cumulative additions since C151:
+- **C200** — GPU profiling toolchain + roofline notes (`docs/notes/gpu-profiling.md`, 254 lines). Nsight Compute + roofline methodology established.
+- **C201** — NCCL benchmark + communication principle notes. `examples/nccl_benchmark.py` (315 lines: all_reduce/reduce_scatter/all_gather sweep); `docs/notes/nccl-architecture.md` (363 lines: ring vs tree algorithms, NCCL adaptive routing); `docs/notes/rdma-overview.md` (414 lines: IB Verbs / RoCE / iWARP, NCCL plugin interface).
+- **C210** — `csrc/cache_kernels.cu` upgraded from 1 op (reshape_and_cache, single dtype) to 7 ops (reshape_and_cache, reshape_and_cache_flash, swap_blocks, copy_blocks, cp_gather_cache, convert_fp8, concat_and_cache_mla). All 7 exposed via `my_vllm._C`; Python wrappers in `_custom_ops.py`.
+- **C211** — `triton_unified_attention.py` (1194 lines) PD-aware three-mode verification (decode-only / prefill-only / mixed chunked) + per-token-head quant branch verified (INT8 + FP8 e4m3). 8 tests in `test_C211_unified_attention.py`.
+- **C212** — PD disaggregated single-process e2e (`examples/pd_disaggregated.py`, 480 lines). Uses `ExampleConnector` + `cp_gather_cache` for in-process P→D KV transfer; bit-exact K/V preservation verified.
+- **C213** — `triton_reshape_and_cache_flash.py` (630 lines) full 5-KV_QUANT_MODE alignment. Also fixed `Platform.get_device_capability()` (was stub returning None, blocking FP8 storage).
+- **C214** — `csrc/custom_all_reduce.cu` IPC ring all-reduce (313 lines). 7 ops: `init_custom_ar` / `dispose` / `meta_size` / `register_buffer` / `get_handle` / `open_mem_handle` / `all_reduce`. Python wrapper `my_vllm/distributed/custom_all_reduce.py`. world_size=1 identity + world_size=2..8 ring reduce-scatter.
 
-**JD gap analysis (post-C151)**: Hard-skill coverage vs JD ≈ 50–55% (excluding K8s). Gaps identified: GPU profiling / roofline (zero), NCCL benchmark & RDMA 笔记 (zero), CUDA cache block ops beyond `reshape_and_cache` (only single-op/single-dtype), Triton unified attention depth verification, PD 分离端到端验证, custom IPC all-reduce (zero), spec_decode / elastic_ep / rotary_embedding 决策 + 实装, VMM allocator. Plan drafted at `jd-gap-closure-plan.md` — 16 commits (C200–C233), Triton vs CUDA split per JD mapping (Triton: attention/MoE/spec_decode/rotary; CUDA: cache ops/comm/CUTLASS/VMM).
+**JD gap analysis (post-C214, end of Phase 1)**: Hard-skill coverage vs JD ≈ 70-75% (excluding K8s). Filled since C151: GPU profiling + roofline, NCCL benchmark + RDMA notes, CUDA cache block ops (now 7 ops), Triton unified attention depth (PD three-mode + 5 quant modes), PD 分离 e2e, custom IPC all-reduce. Remaining gaps (drives Phase 2/3): CUTLASS scaled MM / fused_moe (C220/C221), CPU/GPU 异构 (C222), spec_decode ngram (C223), rotary_embedding fused (C224), elastic_ep (C230), VMM allocator (C231).
 
-**Next**: JD gap closure plan (C200–C233, 16 commits) — 见 `jd-gap-closure-plan.md`. **Phase 1 硬性 + GPU Runtime 深度**（C200–C214，7 commit）：profile 工具链 + roofline 笔记；NCCL benchmark + nccl-architecture / rdma-overview 笔记；`cache_kernels.cu` 多 op + 多 dtype 升级（copy_blocks / swap_blocks / concat_mla）；`triton_unified_attention` 五档 KV_QUANT_MODE + PD-aware 三档验证；`triton_reshape_and_cache_flash` 全 quant 对齐；PD 分离单进程 e2e 数值一致性；`custom_all_reduce.cu` + IPC 同 host 多卡。**Phase 2 架构深度 + 加分**（C220–C224，5 commit）：CUTLASS scaled MM benchmark / fused_moe Triton kernel 引入 / CPU-GPU 异构实验 / ngram spec_decode 真实实装 / rotary_embedding fused 路径。**Phase 3 收尾**（C230–C233，4 commit）：elastic_ep 接线 + rebalance / cumem_allocator (VMM) / `docs/notes/` 笔记集 / 全量回归。**Backlog**：K8s 部署计划 (C153–C159，7 commit) — `k8s-deploy-plan.md` 仍在仓库根未 tracked，可并行 Phase 3 或 Phase 3 完成后启动。
+**Next**: Phase 2 (架构深度 + 加分, C220-C224, 5 commits): CUTLASS scaled MM benchmark / Triton fused_moe kernel / CPU-GPU 异构实验 / ngram spec_decode 真实实装 / rotary_embedding fused 路径。Phase 3 (收尾, C230-C233, 4 commits): elastic_ep 接线 + rebalance / cumem_allocator (VMM) / docs/notes 笔记集 / 全量回归。**Backlog**: K8s 部署计划 (C153-C159, 7 commits) — `k8s-deploy-plan.md` 仍在仓库根未 tracked，可并行 Phase 3 或 Phase 3 完成后启动。
 
 ## Scope decision (JD-driven)
 
@@ -76,7 +83,8 @@ There is no CI, no lint, no formatter, no typecheck configured.
 `my_vllm/config/` — `VllmConfig` aggregates `ModelConfig`, `CacheConfig`, `SchedulerConfig`, `ParallelConfig`. Defaults:
 - model: `facebook/opt-125m`, dtype: `bfloat16`, block_size: `16`, num_kv_blocks: `512`, max_num_seqs: `8`
 - enforce_eager: `True`, max_num_batched_tokens: `2048`, eos_token_id: `2`
-- TP=1, PP=1 (config-only; distributed infrastructure exists but not yet wired end-to-end)
+- TP=1, PP=1 (config-only); C150 wires multi-process NCCL end-to-end (`MultiprocExecutor._init_executor` exports `MASTER_ADDR`/`MASTER_PORT`/`WORLD_SIZE`); C214 adds CUDA IPC ring all-reduce for same-host multi-GPU (`my_vllm/distributed/custom_all_reduce.py`).
+- Platform capability detection (C213): `Platform.get_device_capability()` now actually queries `torch.cuda.get_device_capability()` (was a stub returning None), enabling FP8 storage on SM 8.9+.
 
 ## Package layout
 
@@ -106,7 +114,7 @@ my_vllm/
                        #   ops/{triton_unified_attention, triton_reshape_and_cache_flash, paged_attn, triton_attention_helpers}.py
     sample/            # Sampler (nn.Module), LogitsProcessor, SamplingMetadata
     metrics/           # stats, loggers, prometheus
-    spec_decode/       # metadata (stub — 见 cleanup-plan §1.3 B1)
+    spec_decode/       # ngram proposer (C223 plan); metadata / draft_model / eagle stubs
     engine/__init__.py # FinishReason, EngineCoreOutput, EngineCoreOutputs
     request.py         # Request (12 statuses), SamplingParams
     outputs.py         # SamplerOutput, ModelRunnerOutput
@@ -114,19 +122,32 @@ my_vllm/
     utils.py           # ConstantList
     kv_cache_interface.py  # KVCacheSpec hierarchy
   entrypoints/         # → vllm/entrypoints/  llm.py (C151 已删 OpenAI api_server)
-  _custom_ops.py       # CUDA op dispatch (csrc/cache_kernels.cu → _C.reshape_and_cache)
+  _custom_ops.py       # CUDA op dispatch: 7 cache ops (C210) + 7 custom_all_reduce ops (C214)
 
 # Repo root (outside my_vllm/ package)
 run.py                 # CLI entry point
-csrc/                  # C++/CUDA sources (cache_kernels.cu, quantization/)
-setup.py               # build _C extension
-examples/              # run.py, benchmark.py
-deploy/                # K8s 部署实验 (C153-C159, 独立于 my_vllm/，仅通过 HTTP/env/Prometheus 交互)
-  k8s/                 # namespace/configmap/deployment/statefulset/service/hpa/pdb/sa/kustomization
-  observability/       # ServiceMonitor + Prometheus rules + Grafana dashboard
-  autoscaling/         # 独立 scaler.py controller (HPA 不足场景)
-  disaggregated/       # PD 分离部署 (prefill + decode 两套 Deployment)
-k8s-deploy-plan.md     # C153-C159 执行计划 (新)
+csrc/                  # C++/CUDA sources
+                       #   cache_kernels.cu          7 cache block ops (C210)
+                       #   custom_all_reduce.cu       IPC ring all-reduce (C214)
+                       #   custom_all_reduce.cuh      header
+setup.py               # build _C extension (MAX_JOBS=3 to avoid OOM)
+examples/              # run.py + benchmark scripts
+                       #   run.py, benchmark.py                 (pre-existing)
+                       #   nccl_benchmark.py                    (C201) — all_reduce / reduce_scatter / all_gather sweep
+                       #   pd_disaggregated.py                  (C212) — P→D e2e via ExampleConnector
+                       #   profile_attention.py                 (C200) — unified_attention wall-clock
+                       #   profile_cache_write.py               (C200) — triton_reshape_and_cache_flash
+docs/notes/            # Deep-dive notes (per Cxxx items)
+                       #   gpu-profiling.md           (C200) — Nsight Compute / roofline
+                       #   nccl-architecture.md      (C201) — ring/tree allreduce + NVLink/IB routing
+                       #   rdma-overview.md          (C201) — IB Verbs / RoCE / iWARP / NCCL plugin
+docs/snapshots/         # Per-commit closure write-ups (Goal / Features / Flow / Capability / Limitation / Next)
+deploy/                # NOT YET ADDED — K8s 部署实验 (C153-C159 plan, 独立于 my_vllm/，仅通过 HTTP/env/Prometheus 交互)
+                       #   k8s/                 namespace/configmap/deployment/statefulset/service/hpa/pdb/sa/kustomization
+                       #   observability/       ServiceMonitor + Prometheus rules + Grafana dashboard
+                       #   autoscaling/         独立 scaler.py controller (HPA 不足场景)
+                       #   disaggregated/       PD 分离部署 (prefill + decode 两套 Deployment)
+k8s-deploy-plan.md     # C153-C159 执行计划 (未 tracked, Backlog)
 LOOP-PLAN.md           # C124→C128 plan (busy loop + EngineCoreClient)
 ```
 
@@ -212,6 +233,11 @@ See `Prompt/Engineer-Spec/README.md` § Model loading — init/load separation, 
 - Chunked prefill splits long prompts by `token_budget` at the Scheduler level
 - Sampler is an `nn.Module` subclass with penalties → temperature → top-k → top-p → sampling
 - TP=2: initialize_model_parallel(nccl) → GroupCoordinator(all_reduce/all_gather/broadcast), ColumnParallelLinear/RowParallelLinear
+- Multi-process NCCL (C150): `MultiprocExecutor._init_executor` exports `MASTER_ADDR`/`MASTER_PORT`/`WORLD_SIZE` env vars; `Worker.init_device` runs `init_distributed_environment` and creates the model-parallel group.
+- Custom same-host all-reduce (C214): `csrc/custom_all_reduce.cu` exposes `init_custom_ar` / `all_reduce` / `dispose` / `get_handle` / `open_mem_handle`; uses CUDA IPC + ring reduce-scatter (Patariasuk & Yuan 2009); world_size=1 short-circuits to memcpy; world_size cap = 8.
+- PD disaggregation (C212): `ExampleConnector` (kv_transfer/v1) saves KV via `save_kv_layer` on the producer, consumer restores via `start_load_kv` + `get_bundle_kv`; bit-exact K/V preservation verified in single-process simulation.
+- KV cache quantization modes (C211/C213/C149): `KVQuantMode` enum = NONE / FP8_TENSOR / INT8_PER_TOKEN_HEAD / FP8_PER_TOKEN_HEAD / INT4_PER_TOKEN_HEAD. Triton kernels (`triton_unified_attention` + `triton_reshape_and_cache_flash`) handle all 5 modes; per-token-head scales are fused into the QK score (k_scale) and applied to PV (v_scale) to avoid extra BLOCK_M × TILE_SIZE multiplies.
+- Cache kernel op surface (C210): 7 ops in `csrc/cache_kernels.cu` — `reshape_and_cache` (HND layout), `reshape_and_cache_flash` (FlashAttention layout), `swap_blocks` (cudaMemcpyAsync over pair list), `copy_blocks` (multi-dtype GPU block-to-block copy), `cp_gather_cache` (non-contiguous block gather for prefix-cache CoW), `convert_fp8` (FP8 e4m3 ↔ BF16/FP16), `concat_and_cache_mla` (kv_lora_rank + pe_dim; FP8-DS-MLA rejected). FP8 storage path uses Triton (`triton_reshape_and_cache_flash`); CUDA path is the CUDA-graph-friendly fallback.
 - Metrics: TTFT, TPOT, ITL, throughput, KV cache utilization
 
 ## Model dependency
