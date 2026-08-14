@@ -125,6 +125,20 @@ class BlockPool:
         ]
         self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
 
+        # Null block: a permanent sentinel placeholder (ref_cnt not
+        # maintained, never freed). Used by sliding-window / Mamba
+        # managers to pad skipped positions so block-table indices
+        # remain stable across skipped regions.
+        #
+        # C254 deviation from vLLM (L190): we don't pop a real block
+        # from the pool for this. Instead we synthesize a KVCacheBlock
+        # with a sentinel block_id that's not in `self.blocks`. Tests
+        # (C008 / C018) expect block IDs to start at 0 with no offset.
+        # The sentinel is identity-equality unique (`is null_block` /
+        # `== null_block`) but never participates in pool accounting.
+        self.null_block = KVCacheBlock(block_id=-1)
+        self.null_block.is_null = True
+
         self.cached_block_hash_to_block = BlockHashToBlockMap()
 
     def get_new_blocks(self, n: int) -> list[KVCacheBlock] | None:
