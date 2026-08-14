@@ -23,21 +23,22 @@ Every file in `my_vllm/` must correspond to a real file in `vllm/`. No invented 
 
 **Previous history**: Stages C000→C098 were implemented under a prior "educational simulation" model. That history is preserved (never squash/rebase). The project now enters a new phase of **engineering alignment** (C110+) — see `Prompt/Engineer-Spec/README.md` for the full specification.
 
-**Current status**: C248. **Phase 4 (Distributed Runtime 强化, C240-C249)**: 9/10 commits closed (C240 All-to-All, C241 Symmetric Memory, C242 SHM Broadcast, C243 Weight Transfer, C244 Quick/FlashInfer AR 笔记, C245 Async Scheduler, C246 KV-aware scheduling, C247 EP 弹性 rebalance 闭环, C248 Distributed comm benchmark + 笔记). **Phase 1 (硬性 + GPU Runtime 深度, C200-C214) complete**: 7/7 commits closed. **Phase 2 (架构深度 + 加分, C220-C224) complete**: 4/4 done. **Phase 3 (收尾, C230-C233) complete**: 4/4 done — **Phase 1+2+3 closed** ✅.
+**Current status**: C249. **Phase 4 (Distributed Runtime 强化, C240-C249)**: 10/10 commits closed ✅ — **Phase 1+2+3+4 fully closed**. C240 All-to-All, C241 Symmetric Memory, C242 SHM Broadcast, C243 Weight Transfer, C244 Quick/FlashInfer AR 笔记, C245 Async Scheduler, C246 KV-aware scheduling, C247 EP 弹性 rebalance 闭环, C248 Distributed comm benchmark + 笔记, C249 Phase 4 综合回归. **Phase 1 (硬性 + GPU Runtime 深度, C200-C214) complete**: 7/7 commits closed. **Phase 2 (架构深度 + 加分, C220-C224) complete**: 4/4 done. **Phase 3 (收尾, C230-C233) complete**: 4/4 done.
 
-**Project metrics (post-C248)**:
+**Project metrics (post-C249)**:
 
 | Metric                                            | Count                |
 |--------------------------------------------------|----------------------|
 | `my_vllm/` Python files                          | 203                  |
-| `my_vllm/` Python LOC                            | 30,440               |
+| `my_vllm/` Python LOC                            | 31,332               |
 | `csrc/` C/CUDA files                              | 5 (2 vendored)       |
 | CUDA extensions built by `setup.py`              | 2 (`my_vllm._C` + `my_vllm.cumem_allocator`) |
 | Test files                                       | 68                   |
-| Phase 1+2+3+4 test pass rate (C200-C248 scope)  | 552 passed + 4 skipped |
+| Phase 1+2+3+4 test pass rate (C200-C248 scope)  | 552 passed + 4 skipped (2 pre-existing C212 pollution) |
 | Engineering notes (`docs/notes/`)                | 16 / 5,698 lines     |
-| Snapshot files (C200+ era, excl prep/fix)        | 24 (C200-C233 + C240-C248) |
-| Tags (C200+ era)                                 | 26 (incl `C200-prep-docs-sync`, `C248-distributed-comm-benchmark`) |
+| Snapshot files (C200+ era, excl prep/fix)        | 25 (C200-C233 + C240-C249) |
+| Tags (C200+ era)                                 | 27 (incl `C200-prep-docs-sync`, `C249-phase4-final`) |
+| `NotImplementedError` inventory                  | 84 hits, all intentional (28 ABC abstracts + 52 class shells + 4 doc refs) |
 | JD hard-skill coverage (excl. K8s)                | ~89-90%              |
 
 **(C222 已删除——CPU 推理不在 JD 范围；"GPU 异构"由 C220 量化 GEMM + C221 fused MoE 完整覆盖)**
