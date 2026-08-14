@@ -159,6 +159,33 @@ class RotaryEmbedding(RotaryEmbeddingBase):
             self.is_neox_style,
         )
 
+    def forward_cuda(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """CUDA dispatch — in-place fused Q/K rotation via Triton.
+
+        Mirrors ``vllm/model_executor/layers/rotary_embedding/base.py:
+        RotaryEmbeddingBase.forward_cuda``.  We dispatch through
+        ``my_vllm._custom_ops.rotary_embedding`` which routes to the
+        Triton kernel on CUDA and falls back to the PyTorch path on
+        CPU.  In-place: query and key are modified directly.
+        """
+        from my_vllm._custom_ops import rotary_embedding
+
+        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
+        rotary_embedding(
+            positions,
+            query,
+            key,
+            self.head_size,
+            cos_sin_cache,
+            self.is_neox_style,
+        )
+        return query, key
+
     def extra_repr(self) -> str:
         s = f"head_size={self.head_size}, rotary_dim={self.rotary_dim}"
         s += f", max_position_embeddings={self.max_position_embeddings}"

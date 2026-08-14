@@ -289,8 +289,81 @@ def rotary_embedding(
     Signature: _C::rotary_embedding(positions, query, key, head_size,
                                      cos_sin_cache, is_neox) -> None
     In-place: modifies query and key tensors.
+
+    Dispatch:
+      * CUDA + Triton available → Triton fused kernel
+        (my_vllm.model_executor.layers.rotary_embedding.triton_rotary).
+      * Otherwise → PyTorch fallback
+        (ApplyRotaryEmb.forward_static on Q and K separately,
+        rewriting them in place).
     """
-    pass
+    if (
+        query.is_cuda
+        and positions.is_cuda
+        and cos_sin_cache.is_cuda
+        and (key is None or key.is_cuda)
+    ):
+        try:
+            from my_vllm.model_executor.layers.rotary_embedding import (
+                triton_rotary,
+            )
+
+            triton_rotary.rotary_embedding_triton(
+                positions,
+                query,
+                key,
+                head_size=head_size,
+                cos_sin_cache=cos_sin_cache,
+                is_neox=is_neox,
+                rot_dim=head_size,
+            )
+            return
+        except ImportError:
+            # Triton module not importable — fall through to PyTorch.
+            pass
+
+    # PyTorch fallback: replicate vLLM's ``forward_static`` in-place.
+    from my_vllm.model_executor.layers.rotary_embedding.common import (
+        ApplyRotaryEmb,
+    )
+
+    pos_flat = positions.flatten()
+    n = pos_flat.shape[0]
+    if n == 0:
+        return
+    cs = cos_sin_cache.index_select(0, pos_flat)
+    cos, sin = cs.chunk(2, dim=-1)
+    cos = cos.unsqueeze(-2)
+    sin = sin.unsqueeze(-2)
+
+    q_view = query.view(n, -1, head_size)
+    q_rot = q_view[..., :head_size]
+    if is_neox:
+        x1, x2 = torch.chunk(q_rot, 2, dim=-1)
+    else:
+        x1 = q_rot[..., ::2]
+        x2 = q_rot[..., 1::2]
+    o1 = x1 * cos - x2 * sin
+    o2 = x2 * cos + x1 * sin
+    if is_neox:
+        torch.cat((o1, o2), dim=-1, out=q_rot)
+    else:
+        torch.stack((o1, o2), dim=-1).flatten(-2, out=q_rot)
+
+    if key is not None:
+        k_view = key.view(n, -1, head_size)
+        k_rot = k_view[..., :head_size]
+        if is_neox:
+            x1, x2 = torch.chunk(k_rot, 2, dim=-1)
+        else:
+            x1 = k_rot[..., ::2]
+            x2 = k_rot[..., 1::2]
+        o1 = x1 * cos - x2 * sin
+        o2 = x2 * cos + x1 * sin
+        if is_neox:
+            torch.cat((o1, o2), dim=-1, out=k_rot)
+        else:
+            torch.stack((o1, o2), dim=-1).flatten(-2, out=k_rot)
 
 
 # ---------------------------------------------------------------------------
