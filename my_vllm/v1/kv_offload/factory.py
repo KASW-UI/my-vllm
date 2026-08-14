@@ -42,6 +42,30 @@ class OffloadingSpecFactory:
     """Lazy-loading registry for `OffloadingSpec` subclasses."""
 
     _registry: dict[str, Callable[[], type[OffloadingSpec]]] = {}
+    # Built-in specs (CPU + Tiering). These survive `reset()` so the
+    # test-suite's `reset()` calls don't wipe them out.
+    _builtin_specs: dict[str, Callable[[], type[OffloadingSpec]]] = {}
+    _builtins_registered: bool = False
+
+    @classmethod
+    def _register_builtins(cls) -> None:
+        """Install the built-in CPU + Tiering registrations."""
+        cls.register_spec(
+            "CPUOffloadingSpec",
+            "my_vllm.v1.kv_offload.cpu.spec",
+            "CPUOffloadingSpec",
+        )
+        cls.register_spec(
+            "TieringOffloadingSpec",
+            "my_vllm.v1.kv_offload.tiering.spec",
+            "TieringOffloadingSpec",
+        )
+        cls._builtins_registered = True
+
+    @classmethod
+    def _ensure_builtins_registered(cls) -> None:
+        if not cls._builtins_registered:
+            cls._register_builtins()
 
     @classmethod
     def register_spec(
@@ -74,6 +98,7 @@ class OffloadingSpecFactory:
            import that module and look up the class.
         4. Else raise `ValueError`.
         """
+        cls._ensure_builtins_registered()
         spec_name = extra_config.get("spec_name", _DEFAULT_SPEC_NAME)
         if spec_name in cls._registry:
             return cls._registry[spec_name]()
@@ -94,6 +119,7 @@ class OffloadingSpecFactory:
 
         Logs the chosen spec name at info level.
         """
+        cls._ensure_builtins_registered()
         spec_name = config.extra_config.get(
             "spec_name", _DEFAULT_SPEC_NAME
         )
@@ -102,13 +128,24 @@ class OffloadingSpecFactory:
 
     @classmethod
     def reset(cls) -> None:
-        """Wipe the registry (test helper)."""
+        """Wipe the registry (test helper).
+
+        Built-in registrations (CPU + Tiering) survive the reset —
+        they are re-bootstrapped on the next lookup via
+        `_ensure_builtins_registered()`.
+        """
         cls._registry.clear()
+        cls._builtins_registered = False
 
     @classmethod
     def known_specs(cls) -> list[str]:
         """Return the list of registered spec names."""
+        cls._ensure_builtins_registered()
         return list(cls._registry.keys())
+
+
+# Built-in registrations are installed lazily via _ensure_builtins_registered()
+# to keep the CPU/Tiering modules optional (no eager import at my-vllm startup).
 
 
 __all__ = ["OffloadingSpecFactory"]

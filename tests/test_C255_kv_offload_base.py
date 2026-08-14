@@ -498,14 +498,18 @@ class TestOffloadingSpecFactory:
             )
 
     def test_get_spec_cls_raises_for_unknown(self):
-        # No registration + no spec_module_path → ValueError.
+        # Unknown name + no spec_module_path → ValueError.
         with pytest.raises(ValueError, match="Unsupported spec type"):
-            OffloadingSpecFactory.get_spec_cls({})
+            OffloadingSpecFactory.get_spec_cls(
+                {"spec_name": "_UnknownSpec_MnoPqr"}
+            )
 
     def test_get_spec_cls_default_name(self):
         # No "spec_name" in extra_config → defaults to "CPUOffloadingSpec".
-        with pytest.raises(ValueError, match="CPUOffloadingSpec"):
-            OffloadingSpecFactory.get_spec_cls({})
+        # CPUOffloadingSpec IS pre-registered as a built-in (C256), so
+        # the lookup succeeds.
+        spec_cls = OffloadingSpecFactory.get_spec_cls({})
+        assert spec_cls.__name__ == "CPUOffloadingSpec"
 
     def test_get_spec_cls_via_spec_module_path(self):
         # Ad-hoc registration via extra_config["spec_module_path"].
@@ -555,9 +559,11 @@ class TestOffloadingSpecFactory:
         assert isinstance(spec, OffloadingSpec)
 
     def test_create_spec_default_name(self):
-        # Default name → "CPUOffloadingSpec" → not registered → ValueError.
+        # Default name → "CPUOffloadingSpec" → pre-registered as a
+        # built-in (C256), so lookup succeeds. The instantiation
+        # itself fails because cpu_bytes_to_use is required.
         cfg = _make_offloading_config()
-        with pytest.raises(ValueError, match="CPUOffloadingSpec"):
+        with pytest.raises(Exception, match="cpu_bytes_to_use"):
             OffloadingSpecFactory.create_spec(cfg)
 
     def test_known_specs(self):

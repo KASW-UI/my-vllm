@@ -58,6 +58,29 @@ from my_vllm.v1.kv_offload.config import (
 )
 from my_vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from my_vllm.v1.kv_offload.file_mapper import FileMapper
+# C256 CPU + Tiering re-exports.
+from my_vllm.v1.kv_offload.cpu import (
+    ARCCachePolicy,
+    BlockStatus,
+    CachePolicy,
+    CPUOffloadingManager,
+    CPUOffloadingMetrics,
+    CPUOffloadingSpec,
+    CPUOffloadingWorker,
+    CPULoadStoreSpec,
+    LRUCachePolicy,
+)
+from my_vllm.v1.kv_offload.tiering import (
+    CPUPrimaryTierOffloadingManager,
+    ExampleSecondaryTierManager,
+    JobMetadata,
+    JobResult,
+    ParentManager,
+    SecondaryTierFactory,
+    SecondaryTierManager,
+    TieringOffloadingManager,
+    TieringOffloadingSpec,
+)
 
 
 __all__ = [
@@ -99,4 +122,24 @@ __all__ = [
     "OffloadingSpecFactory",
     # FileMapper
     "FileMapper",
+    # CPU backend (C256)
+    "ARCCachePolicy",
+    "BlockStatus",
+    "CachePolicy",
+    "CPUOffloadingManager",
+    "CPUOffloadingMetrics",
+    "CPUOffloadingSpec",
+    "CPUOffloadingWorker",
+    "CPULoadStoreSpec",
+    "LRUCachePolicy",
+    # Tiering (C256)
+    "CPUPrimaryTierOffloadingManager",
+    "ExampleSecondaryTierManager",
+    "JobMetadata",
+    "JobResult",
+    "ParentManager",
+    "SecondaryTierFactory",
+    "SecondaryTierManager",
+    "TieringOffloadingManager",
+    "TieringOffloadingSpec",
 ]
