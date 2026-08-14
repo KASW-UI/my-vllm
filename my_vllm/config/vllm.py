@@ -9,6 +9,7 @@ from my_vllm.config.model import ModelConfig
 from my_vllm.config.parallel import ParallelConfig
 from my_vllm.config.quantization import QuantizationConfig
 from my_vllm.config.scheduler import SchedulerConfig
+from my_vllm.config.speculative import SpeculativeConfig
 
 if TYPE_CHECKING:
     from my_vllm.config.kv_transfer import KVTransferConfig
@@ -25,6 +26,12 @@ class VllmConfig:
     )
     lora_config: LoRAConfig | None = None
     kv_transfer_config: "KVTransferConfig | None" = None
+    speculative_config: SpeculativeConfig | None = None
+    """Speculative decoding configuration.  ``None`` (the default)
+    disables spec decoding.  Mirrors vLLM ``VllmConfig.
+    speculative_config`` — set to ``SpeculativeConfig(method="ngram",
+    num_speculative_tokens=K, ...)`` to enable the n-gram proposer
+    (see ``my_vllm.v1.spec_decode.ngram_proposer``)."""
 
 
 EngineConfig = VllmConfig
