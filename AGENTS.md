@@ -32,7 +32,7 @@ Every file in `my_vllm/` must correspond to a real file in `vllm/`. No invented 
 - **C213** — `triton_reshape_and_cache_flash.py` (630 lines) full 5-KV_QUANT_MODE alignment. Also fixed `Platform.get_device_capability()` (was stub returning None, blocking FP8 storage).
 - **C214** — `csrc/custom_all_reduce.cu` IPC ring all-reduce (361 lines). 7 ops: `init_custom_ar` / `dispose` / `meta_size` / `register_buffer` / `get_handle` / `open_mem_handle` / `all_reduce`. Python wrapper `my_vllm/distributed/custom_all_reduce.py`. world_size=1 identity + world_size=2..8 ring reduce-scatter.
 - **C220** — `cutlass_scaled_mm` Python interface + `scaled_fp8_quant` / `scaled_int8_quant` activation-side quant. `my_vllm/_custom_ops.py` dispatches FP8 → `torch._scaled_mm`, INT8 → `torch._int_mm`, BF16/FP16 → `torch.mm`. `examples/quant_gemm_benchmark.py` (356 lines, BF16 vs FP8 vs INT8 sweep over M × (K,N)); `docs/notes/cutlass-scaled-mm.md` (319 lines: CUTLASS scaled MM contract, scale schemes, Marlin / Machete / DeepGEMM ecosystem, FP8 e4m3 vs e5m2, methodology). 29 tests in `test_C220_quant_gemm.py`. RTX 4060 sm_89: FP8 ~2× BF16, INT8 ~2.3× BF16 at large M (1024+).
-- **C221** — Triton fused MoE kernel + `moe_align_block_size`. `my_vllm/model_executor/layers/fused_moe/{moe_align_block_size.py, fused_moe_triton.py, fused_moe.py}` (744 lines: token alignment helper + simplified FP16 grouped-matmul kernel + launcher + Triton-only dispatcher); `fused_moe()` has **no Python fallback** (CPU inference is out of scope — JD is GPU inference). `examples/moe_benchmark.py` (377 lines, fused vs idealized unfused MoE sweep); 12 tests in `test_C221_fused_moe.py`. Numerically matches per-expert Python reference at M=32; fused approaches unfused TFLOPS at M ≥ 1024 on RTX 4060.
+- **C221** — Triton fused MoE kernel + `moe_align_block_size`. `my_vllm/model_executor/layers/fused_moe/{moe_align_block_size.py (177), fused_moe_triton.py (403), fused_moe.py (90)}` (670 lines: token alignment helper + simplified FP16 grouped-matmul kernel + launcher + Triton-only dispatcher); `fused_moe()` has **no Python fallback** (CPU inference is out of scope — JD is GPU inference). `examples/moe_benchmark.py` (377 lines, fused vs idealized unfused MoE sweep); 12 tests in `test_C221_fused_moe.py`. Numerically matches per-expert Python reference at M=32; fused approaches unfused TFLOPS at M ≥ 1024 on RTX 4060.
 
 **JD gap analysis (post-C221, Phase 2 2/4)**: Hard-skill coverage vs JD ≈ 80-84% (excluding K8s). Filled since C151: GPU profiling + roofline, NCCL + RDMA, CUDA cache block ops, Triton unified attention depth, PD 分离, custom IPC all-reduce, CUTLASS scaled MM (Python interface + benchmark), Triton fused MoE + alignment. Remaining gaps (drives Phase 2/3): spec_decode ngram (C223), rotary_embedding fused (C224), elastic_ep (C230), VMM allocator (C231).
 
@@ -116,7 +116,7 @@ my_vllm/
                        #   ops/{triton_unified_attention, triton_reshape_and_cache_flash, paged_attn, triton_attention_helpers}.py
     sample/            # Sampler (nn.Module), LogitsProcessor, SamplingMetadata
     metrics/           # stats, loggers, prometheus
-    spec_decode/       # ngram proposer (C223 plan); metadata / draft_model / eagle stubs
+    spec_decode/       # ngram proposer (C223 plan); metadata / draft_model / eagle / metrics / utils stubs
     engine/__init__.py # FinishReason, EngineCoreOutput, EngineCoreOutputs
     request.py         # Request (12 statuses), SamplingParams
     outputs.py         # SamplerOutput, ModelRunnerOutput
