@@ -29,16 +29,16 @@ Every file in `my_vllm/` must correspond to a real file in `vllm/`. No invented 
 
 | Metric                                            | Count                |
 |--------------------------------------------------|----------------------|
-| `my_vllm/` Python files                          | 235 (+12: kv_offload/cpu/{__init__,common,manager,gpu_worker,spec}.py + kv_offload/cpu/policies/{__init__,base,lru,arc}.py + kv_offload/tiering/{__init__,base,factory,manager,spec}.py) |
-| `my_vllm/` Python LOC                            | 39,600               |
+| `my_vllm/` Python files                          | 237 (+19: kv_offload/{__init__,base,config,factory,file_mapper}.py + kv_offload/cpu/{__init__,common,manager,gpu_worker,spec}.py + kv_offload/cpu/policies/{__init__,base,lru,arc}.py + kv_offload/tiering/{__init__,base,factory,manager,spec}.py) |
+| `my_vllm/` Python LOC                            | 40,200               |
 | `csrc/` C/CUDA files                              | 5 (2 vendored)       |
 | CUDA extensions built by `setup.py`              | 2 (`my_vllm._C` + `my_vllm.cumem_allocator`) |
 | Test files                                       | 75 (73 Cxxx + 2 legacy) |
 | Phase 1+2+3+4 + 4v2 test pass rate (C200-C256)  | 961 passed + 4 skipped (2 pre-existing C212 pollution) |
 | Engineering notes (`docs/notes/`)                | 16 / 5,698 lines     |
-| Snapshot files (C200+ era, excl prep/fix)        | 33 (C200-C233 + C240-C256) |
+| Snapshot files (C200+ era, excl prep/fix)        | 32 (C200-C233 + C240-C256) |
 | Tags (C200+ era)                                 | 35 (incl `C256-kv-offload-tiering`) |
-| JD hard-skill coverage (excl. K8s)                | ~89-90%              |
+| JD hard-skill coverage (excl. K8s)                | ~90%                 |
 
 **(C222 已删除——CPU 推理不在 JD 范围；"GPU 异构"由 C220 量化 GEMM + C221 fused MoE 完整覆盖)**
 - **C240** — All-to-All 通信算子 (S-level gap, AG+RS backend). `my_vllm/distributed/device_communicators/` (NEW package: `base_device_communicator.py` + `all2all.py` + `cuda_communicator.py`); `AgRsAll2AllManager` 真实实装（dispatch / dispatch_router_logits / combine via NCCL/Gloo AllGather + ReduceScatter），DeepEP HT/LL/V2 / NIXL EP / FlashInfer NVLink / Mori backend class shells。`my_vllm/distributed/parallel_state.py` 扩展 `_EP` group + `get_ep_group()` + `init_expert_parallel()` + `GroupCoordinator.all_gatherv/reduce_scatterv/dispatch/combine` façade。`my_vllm/model_executor/layers/fused_moe/modular_kernel.py` (NEW): `FusedMoEPrepareAndFinalize` ABC + Modular/Monolithic。`my_vllm/model_executor/layers/fused_moe/prepare_finalize/{naive_dp_ep, no_dp_ep}.py` (NEW): NaiveDPEP + NoDPEP concrete prepare/finalize + factory。`my_vllm/model_executor/layers/fused_moe/all2all_utils.py` (NEW): `maybe_make_prepare_finalize()` dispatcher + `get_ep_all2all_manager()`。`my_vllm/model_executor/layers/fused_moe/config.py` 扩展 `use_*_kernels` properties。`my_vllm/config/parallel.py` 扩展 `All2AllBackend` literal + `ParallelConfig.all2all_backend` field。`examples/all2all_benchmark.py` (NEW) + `docs/notes/all2all-overview.md` (NEW, 474 lines) + `tests/test_C240_all2all.py` (NEW, 17 test classes, 61 cases incl. multi-process gloo round-trip via `torch.multiprocessing.spawn`)。
@@ -73,7 +73,29 @@ Every file in `my_vllm/` must correspond to a real file in `vllm/`. No invented 
 - **C232** — `docs/notes` 综合笔记集 (index + 3 surveys). `docs/notes/README.md` (NEW 191 lines): single-entry-point index with topical map + JD-keyword map + commit→note map + reading order + source-of-truth pointer. `docs/notes/gpu-arch-primer.md` (NEW 306 lines): SM / warp / memory hierarchy / tensor-core throughput matrix / Roofline / occupancy primer. `docs/notes/vllm-runtime-overview.md` (NEW 428 lines): top-down walkthrough of the vLLM V1 runtime stack (HTTP → EngineCore → Scheduler → Executor → Worker → GPUModelRunner → Model → Attention → Sampler), each layer annotated with the `my_vllm/` file + the Cxxx commit, plus architectural boundaries + performance hotspots + "where to start debugging". `docs/notes/quantization-landscape.md` (NEW 315 lines): FP8 / INT8 / INT4 (Marlin / AWQ / GPTQ) / FP4 (NVFP4) survey with the format zoo + accuracy-throughput tradeoff + per-tensor vs per-token vs per-channel + activation-outlier problem + per-GPU decision tree. Total: 8 notes, 2,589 lines (was 4 notes, 1,349 lines). Each new note ≥ 306 lines per `jd-gap-closure-plan.md` §C232 acceptance.
 - **C233** — 全量回归 (Phase 1+2+3 闭环). Regression check across all 14 Phase 1+2+3 commits (C200-C232 excluding the deleted C222). `pytest tests/test_C{200,201,210,211,212,213,214,220,221,223,224,230,231}_*.py` → **230 passed + 4 skipped** (2 C212 failures are test pollution between sessions — pass 5/5 isolated; pre-existing PyTorch CUDA state issue, not a regression). `python run.py` → end-to-end pass (checkpoint load + prefill + decode + token emission + LENGTH stop). `grep -rn "NotImplementedError" my_vllm/` → **43 hits, all intentional**: 28 ABC abstract methods (WorkerBase / QuantizationConfig / AttentionBackend / FusedMoERouter / CustomOp.forward_native-cuda-hip / WorkerProfiler / Platform.forward_tpu / KVCacheQuantConfig / FusedTopKRouter) + 12 documented class shells (eagle.py / draft_model.py per C223; logprobs.py / cp_utils.py / multiproc_executor.py per cleanup) + 3 dispatcher stubs (create_spec_decode_proposer). All 14 Phase 1+2+3 snapshots + tags present. Per `jd-gap-closure-plan.md` §C233-final: Phase 1+2+3 **fully closed**.
 
-**JD gap analysis (post-C248, Phase 1+2+3 closed + Phase 4 at 9/10)**: Hard-skill coverage vs JD ≈ 89-90% (excluding K8s). Filled since C151: GPU profiling + roofline, NCCL + RDMA, CUDA cache block ops (7 ops / multi-dtype), Triton unified attention (PD-aware + per-token-head quant), PD 分离 (ExampleConnector + cp_gather_cache), custom IPC all-reduce, CUTLASS scaled MM (FP8/INT8/BF16), Triton fused MoE (token alignment + grouped GEMM), ngram spec decoder (Numba-JIT + KMP-style LPS), fused RoPE (Triton + GQA), elastic EP rebalance (state machine + threshold policy), CUDA VMM allocator (real C ext: cuMemCreate/Map/Unmap), ring all-to-all (AgRs backend + prepare/finalize ABCs), SymmMem / NVLS heuristic + dispatch, SHM broadcast + ObjectStorage, **cross-process weight transfer** (3 backends + packed-tensor efficiency), **holistic distributed comm benchmark suite (5 collectives × 5 backends, single CSV harness)**, **16 comprehensive engineering notes (5,698 lines)**. Pre-cleanup-era test failures (72 in C001-C031 + C126-C128 + hot_path) are **expected** per `AGENTS.md` "Test expectations" — they're pre-C151-cleanup artifacts, not regressions from Phase 1+2+3+4 work.
+**JD gap analysis (post-C256, Phase 1+2+3 closed + Phase 4 v2 at 7/10)**: Hard-skill coverage vs JD ≈ 90% (excluding K8s). Filled since C151:
+- **GPU profiling + roofline** (C200: Nsight + roofline methodology).
+- **NCCL + RDMA** (C201: ring vs tree allreduce, IB / RoCE / iWARP survey).
+- **CUDA cache block ops** — 7 ops / multi-dtype (C210: `cache_kernels.cu`).
+- **Triton unified attention** — PD-aware three-mode + per-token-head quant (C211).
+- **PD 分离** — `ExampleConnector` (C212/C253) + `cp_gather_cache` (C210) + NIXL protocol (C250) + `InMemoryEventPublisher` + `StatelessCoordinator` (C252).
+- **Custom IPC all-reduce** (C214: world_size=1..8 ring reduce-scatter).
+- **CUTLASS scaled MM** — FP8/INT8/BF16 (C220: BF16 vs FP8 vs INT8 sweep).
+- **Triton fused MoE** — token alignment + grouped GEMM (C221).
+- **Ngram spec decoder** — Numba-JIT + KMP-style LPS (C223).
+- **Fused RoPE** — Triton + GQA (C224).
+- **Elastic EP rebalance** — state machine + threshold policy (C247).
+- **CUDA VMM allocator** — real C ext: `cuMemCreate/Map/Unmap` (C231).
+- **Ring all-to-all** — AgRs backend + prepare/finalize ABCs (C240).
+- **SymmMem / NVLS** — heuristic + dispatch (C241).
+- **SHM broadcast + ObjectStorage** — lock-free ring buffer + KV cache eviction (C242).
+- **Cross-process weight transfer** — 3 backends + packed-tensor efficiency (C243).
+- **Holistic distributed comm benchmark** — 5 collectives × 5 backends, single CSV harness (C248).
+- **Multi-spec KV Coordinator** — `KVCacheSpec` registry + `HybridKVCacheCoordinator` fixed-point (C254).
+- **KV Offload base + tiering** — `OffloadingSpec`/`OffloadingManager`/`OffloadingWorker` ABCs + concrete `CPUOffloadingSpec` + composing `TieringOffloadingSpec` + `SecondaryTierFactory` plug-in (C255 + C256).
+- **16 comprehensive engineering notes** (5,698 lines, indexed in C232).
+
+Pre-cleanup-era test failures (72 in C001-C031 + C126-C128 + hot_path) are **expected** per `AGENTS.md` "Test expectations" — they're pre-C151-cleanup artifacts, not regressions from Phase 1+2+3+4+4v2 work.
 
 **Next**: **Phase 4 v2** (C257-C259, 3 commits remaining: Simple KV Offload / PD Disaggregation benchmark / regression). **Phase 5** (C260-C269, 10 commits: Scheduler priority+preemption / CUDA VMM sleep 闭环 / Inductor piecewise / Spec decode runner 闭环 / MoE AllToAll 集成 / MLA / Warmup / UVA offload). **K8s 部署计划** (C153-C159, 7 commits) — `k8s-deploy-plan.md` 仍在仓库根未 tracked，可与已闭环的 Phase 1+2+3+4+4v2 并行启动。Phase 3 closure ≠ project closure。
 
