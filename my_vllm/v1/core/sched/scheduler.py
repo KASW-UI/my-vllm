@@ -69,6 +69,18 @@ class Scheduler(SchedulerInterface):
         self.max_num_batched_tokens = sc.max_num_batched_tokens
         self.lora_config = vllm_config.lora_config
 
+        # C246: KV-aware scheduling knobs (opt-in).
+        self.kv_aware: bool = sc.kv_aware
+        self.kv_occupancy_threshold: float = sc.kv_occupancy_threshold
+        # ``_block_size`` is read from the kv_cache_manager if available,
+        # else defaulted to 16 (matches vLLM's default).  Block-size
+        # estimation is the divisor for prompt / max_tokens → block
+        # count; the fallback ensures the scheduler doesn't crash
+        # before a kv_cache_manager is wired (e.g. in unit tests).
+        self._block_size: int = (
+            getattr(kv_cache_manager, "block_size", 16) or 16
+        )
+
     # ── Public API ──────────────────────────────────────────────────────
 
     def add_request(self, request: Request):
@@ -211,6 +223,17 @@ class Scheduler(SchedulerInterface):
             ):
                 skipped_lora_reqs.append(req)
                 continue
+
+            # C246: KV-aware pre-flight check (opt-in).  When
+            # ``kv_aware=True``, skip requests whose projected
+            # KV cost would push us over the occupancy ceiling —
+            # preempting-after-fail (legacy path) wastes a chunked
+            # prefill cycle on a request that was never going to fit.
+            # When ``kv_aware=False`` (default), the legacy
+            # allocation-fail path is preserved.
+            if not self._has_kv_budget_estimate(req):
+                self.waiting.prepend_request(req)
+                break
 
             # KV cache allocation; preempt if needed.
             allocated = self._try_allocate_kv(
@@ -422,6 +445,121 @@ class Scheduler(SchedulerInterface):
 
     def _has_token_budget(self, remaining: int) -> bool:
         return remaining > 0
+
+    # ── C246 KV-aware scheduling helpers ────────────────────────────────
+
+    def _estimate_kv_blocks_for_request(self, request: Request) -> int:
+        """Estimate the maximum KV blocks a request will occupy.
+
+        Projection: ``ceil((prompt_len + max_output) / block_size)``.
+
+        The prompt_len is the full prompt token count; max_output is
+        read from ``request.sampling_params.max_tokens`` (defaults to
+        ``_DEFAULT_MAX_TOKENS`` = 256 when unset, matching vLLM's
+        scheduler).  This is an upper bound — actual usage may be
+        smaller if the request hits EOS before max_tokens, but the
+        scheduler plans for the worst case so chunked prefill + decode
+        growth fits within the budget.
+
+        For chunked-prefill requests, this estimate covers the full
+        prefill (we don't discount cached prefix blocks here — the
+        scheduler already accounts for prefix-cache hits via
+        ``kv_cache_manager.get_computed_blocks`` in the normal
+        allocation path).
+
+        Args:
+            request: The request to estimate.
+
+        Returns:
+            Estimated block count (>= 1).
+        """
+        prompt_len = len(request.prompt_token_ids)
+        max_output = (
+            request.sampling_params.max_tokens
+            if request.sampling_params is not None
+            else self._DEFAULT_MAX_TOKENS
+        )
+        # Defensive: zero-prompt requests still need at least one block.
+        total_tokens = max(1, prompt_len + max_output)
+        # ceil division; block_size is guaranteed > 0.
+        return (total_tokens + self._block_size - 1) // self._block_size
+
+    def _kv_blocks_in_use(self) -> int:
+        """Sum of KV blocks currently held by running requests.
+
+        Reads from ``kv_cache_manager.request_blocks`` when available
+        (the legacy C014-compatible mirror).  Returns 0 when no
+        kv_cache_manager is wired.
+
+        Note: this counts blocks-per-request from the cache manager's
+        view; under chunked prefill some blocks may not yet be
+        populated (the request only has them allocated, not yet
+        filled with KV).  We count them anyway because the allocation
+        is what determines available capacity.
+        """
+        if self.kv_cache_manager is None:
+            return 0
+        return sum(
+            len(blocks)
+            for blocks in self.kv_cache_manager.request_blocks.values()
+        )
+
+    def _total_kv_blocks(self) -> int:
+        """Total KV blocks in the cache (capacity).
+
+        Reads directly from ``block_pool.num_blocks`` when available
+        (the source of truth — ``num_free_blocks`` is computed from
+        the pool, and ``request_blocks`` may be populated out-of-band
+        for testing without going through ``allocate_slots``, so
+        ``num_free + in_use`` would double-count).
+
+        Returns 0 when no kv_cache_manager is wired.
+        """
+        if self.kv_cache_manager is None:
+            return 0
+        pool = getattr(self.kv_cache_manager, "block_pool", None)
+        if pool is None:
+            return 0
+        return getattr(pool, "num_blocks", 0)
+
+    def _kv_budget_ceiling(self) -> int:
+        """Maximum blocks allowed under the configured occupancy threshold.
+
+        Returns ``floor(total * threshold)``.  At threshold=0.95 the
+        ceiling is 5% below total — a 5% headroom for chunked-prefill
+        growth + decode-step additions.  At threshold=1.0 the ceiling
+        equals total (no headroom — risky; requests will allocation-
+        fail at the very last block).
+
+        Returns 0 when no kv_cache_manager is wired.
+        """
+        return int(self._total_kv_blocks() * self.kv_occupancy_threshold)
+
+    def _has_kv_budget_estimate(self, request: Request) -> bool:
+        """Check whether ``request`` fits under the KV ceiling (C246).
+
+        Cost-aware pre-flight: returns False if scheduling this
+        request would push total KV occupancy over the configured
+        ceiling.  Used only when ``self.kv_aware=True``; the legacy
+        allocation-failure path (``_try_allocate_kv`` returning None)
+        is preserved for ``kv_aware=False``.
+
+        Args:
+            request: The waiting request being considered.
+
+        Returns:
+            True if the request fits; False if it would push KV over
+            the ceiling.  Always True when no kv_cache_manager is
+            wired (caller falls back to the legacy path).
+        """
+        if not self.kv_aware:
+            return True  # legacy path: always allow, allocation may fail
+        if self.kv_cache_manager is None:
+            return True
+        estimated = self._estimate_kv_blocks_for_request(request)
+        current = self._kv_blocks_in_use()
+        ceiling = self._kv_budget_ceiling()
+        return current + estimated <= ceiling
 
     @staticmethod
     def _has_kv_budget(blocks) -> bool:
