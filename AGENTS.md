@@ -23,7 +23,24 @@ Every file in `my_vllm/` must correspond to a real file in `vllm/`. No invented 
 
 **Previous history**: Stages C000→C098 were implemented under a prior "educational simulation" model. That history is preserved (never squash/rebase). The project now enters a new phase of **engineering alignment** (C110+) — see `Prompt/Engineer-Spec/README.md` for the full specification.
 
-**Current status**: C233. **Phase 1 (硬性 + GPU Runtime 深度, C200-C214) complete**: 7/7 commits closed. **Phase 2 (架构深度 + 加分, C220-C224) complete**: 4/4 done. **Phase 3 (收尾, C230-C233) complete**: 4/4 done — **Phase 1+2+3 closed**. **(C222 已删除——CPU 推理不在 JD 范围；"GPU 异构"由 C220 量化 GEMM + C221 fused MoE 完整覆盖)** Cumulative additions since C151:
+**Current status**: C233. **Phase 1 (硬性 + GPU Runtime 深度, C200-C214) complete**: 7/7 commits closed. **Phase 2 (架构深度 + 加分, C220-C224) complete**: 4/4 done. **Phase 3 (收尾, C230-C233) complete**: 4/4 done — **Phase 1+2+3 closed** ✅.
+
+**Project metrics (post-Phase 1+2+3)**:
+
+| Metric                                            | Count                |
+|--------------------------------------------------|----------------------|
+| `my_vllm/` Python files                          | 178                  |
+| `my_vllm/` Python LOC                            | 23,542               |
+| `csrc/` C/CUDA files                              | 5 (2 vendored)       |
+| CUDA extensions built by `setup.py`              | 2 (`my_vllm._C` + `my_vllm.cumem_allocator`) |
+| Test files                                       | 59                   |
+| Phase 1+2+3 test pass rate (C200-C232 scope)      | 230 passed + 4 skipped |
+| Engineering notes (`docs/notes/`)                | 8 / 2,589 lines      |
+| Snapshot files (`docs/snapshots/Cxxx.md`)        | 14 (C200-C232 + C233 verification) |
+| Commits tagged                                    | 15 (C200-C233 + prep/tidy) |
+| JD hard-skill coverage (excl. K8s)                | ~88-90%              |
+
+**(C222 已删除——CPU 推理不在 JD 范围；"GPU 异构"由 C220 量化 GEMM + C221 fused MoE 完整覆盖)** Cumulative additions since C151:
 - **C200** — GPU profiling toolchain + roofline notes (`docs/notes/gpu-profiling.md`, 253 lines). Nsight Compute + roofline methodology established.
 - **C201** — NCCL benchmark + communication principle notes. `examples/nccl_benchmark.py` (384 lines: all_reduce/reduce_scatter/all_gather sweep); `docs/notes/nccl-architecture.md` (363 lines: ring vs tree algorithms, NCCL adaptive routing); `docs/notes/rdma-overview.md` (414 lines: IB Verbs / RoCE / iWARP, NCCL plugin interface).
 - **C210** — `csrc/cache_kernels.cu` upgraded from 1 op (reshape_and_cache, single dtype) to 7 ops (reshape_and_cache, reshape_and_cache_flash, swap_blocks, copy_blocks, cp_gather_cache, convert_fp8, concat_and_cache_mla). All 7 exposed via `my_vllm._C`; Python wrappers in `_custom_ops.py`.
@@ -57,16 +74,24 @@ source /home/kasw/workspace/gpu-infra/.venv/bin/activate
 # Offline inference (V1 engine)
 python run.py
 
-# Compile the CUDA extension (always pin to 3 cores — the build uses
+# Compile the CUDA extensions (always pin to 3 cores — the build uses
 # ninja and parallel nvcc invocations can OOM the host on small dev boxes).
 # Use MAX_JOBS=3 or `-j3` to be safe.
+#
+# Two extensions are built:
+#   * my_vllm._C              (cache_kernels.cu + custom_all_reduce.cu)
+#   * my_vllm.cumem_allocator  (vendored cumem_allocator.cpp, real VMM)
 MAX_JOBS=3 python setup.py build_ext --inplace
+
+# After build, the .so files sit at my_vllm/_C*.so and my_vllm/cumem_allocator*.so.
+# `python -c "from my_vllm import cumem_allocator; print(cumem_allocator.init_module)"
+# verifies the VMM extension loaded successfully.
 
 # Run all tests
 pytest tests/
 
 # Run a single test file or class
-pytest tests/test_C031_runtime.py -v
+pytest tests/test_C231_cumem_allocator.py -v
 ```
 
 **Test expectations — not all tests must pass at any single Cxxx.**
@@ -139,7 +164,16 @@ csrc/                  # C++/CUDA sources
                        #   cache_kernels.cu          7 cache block ops (C210)
                        #   custom_all_reduce.cu       IPC ring all-reduce (C214)
                        #   custom_all_reduce.cuh      header
-setup.py               # build _C extension (MAX_JOBS=3 to avoid OOM)
+                       # Vendored from vLLM (C231):
+                       #   cumem_allocator.cpp        CUDA VMM (cuMemCreate/Map/Unmap);
+                       #                               my_malloc/my_free C entry points for
+                       #                               PyTorch CUDAPluggableAllocator dlsym;
+                       #                               810 lines extracted verbatim from
+                       #                               vllm/csrc/cumem_allocator.cpp.
+                       #   cumem_allocator_compat.h   CUDA/HIP type aliases + ROCm shim
+                       #                               (#ifdef USE_ROCM gates AMD path).
+setup.py               # builds 2 CUDAExtensions (`my_vllm._C` + `my_vllm.cumem_allocator`)
+                       # use MAX_JOBS=3 to avoid OOM during parallel nvcc invocations
 examples/              # run.py + benchmark scripts
                        #   run.py, benchmark.py                 (pre-existing)
                        #   nccl_benchmark.py                    (C201) — all_reduce / reduce_scatter / all_gather sweep
@@ -150,11 +184,16 @@ examples/              # run.py + benchmark scripts
                        #   profile_cache_write.py               (C200) — triton_reshape_and_cache_flash
                        #   quant_gemm_benchmark.py              (C220) — BF16 vs FP8 vs INT8 GEMM sweep
                        #   moe_benchmark.py                     (C221) — fused vs unfused MoE synthetic
-docs/notes/            # Deep-dive notes (per Cxxx items)
+docs/notes/            # Deep-dive notes (per Cxxx items + 3 new C232 surveys)
+                       #   README.md                  (C232) — index + topical / JD / reading-order map
+                       #   gpu-arch-primer.md         (C232) — SM/warp/memory/Roofline/occupancy primer
+                       #   vllm-runtime-overview.md   (C232) — top-down vLLM V1 stack walkthrough
+                       #   quantization-landscape.md  (C232) — FP8/INT4/Marlin/AWQ/NVFP4 survey
                        #   gpu-profiling.md           (C200) — Nsight Compute / roofline
                        #   nccl-architecture.md      (C201) — ring/tree allreduce + NVLink/IB routing
                        #   rdma-overview.md          (C201) — IB Verbs / RoCE / iWARP / NCCL plugin
                        #   cutlass-scaled-mm.md      (C220) — scaled_mm contract + Marlin/Machete/DeepGEMM ecosystem
+                       # total: 8 notes / 2,589 lines
 docs/snapshots/         # Per-commit closure write-ups (Goal / Features / Flow / Capability / Limitation / Next)
 deploy/                # NOT YET ADDED — K8s 部署实验 (C153-C159 plan, 独立于 my_vllm/，仅通过 HTTP/env/Prometheus 交互)
                        #   k8s/                 namespace/configmap/deployment/statefulset/service/hpa/pdb/sa/kustomization
