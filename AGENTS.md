@@ -30,14 +30,14 @@ Every file in `my_vllm/` must correspond to a real file in `vllm/`. No invented 
 | Metric                                            | Count                |
 |--------------------------------------------------|----------------------|
 | `my_vllm/` Python files                          | 191                  |
-| `my_vllm/` Python LOC                            | 27,503               |
+| `my_vllm/` Python LOC                            | 27,429               |
 | `csrc/` C/CUDA files                              | 5 (2 vendored)       |
 | CUDA extensions built by `setup.py`              | 2 (`my_vllm._C` + `my_vllm.cumem_allocator`) |
 | Test files                                       | 62                   |
 | Phase 1+2+3+4 test pass rate (C200-C242 scope)    | 355 passed + 4 skipped |
 | Engineering notes (`docs/notes/`)                | 11 / 3,909 lines     |
-| Snapshot files (`docs/snapshots/Cxxx.md`)        | 17 (C200-C233 + C240 + C241 + C242) |
-| Commits tagged                                    | 18 (C200-C233 + C240 + C241 + C242) |
+| Snapshot files (C200+ era, excl prep/fix)        | 18 (C200-C233 + C240 + C241 + C242) |
+| Tags (C200+ era)                                 | 20 (incl `C200-prep-docs-sync`, `C221-prep-mo-tidy`) |
 | JD hard-skill coverage (excl. K8s)                | ~88-90%              |
 
 **(C222 已删除——CPU 推理不在 JD 范围；"GPU 异构"由 C220 量化 GEMM + C221 fused MoE 完整覆盖)**
