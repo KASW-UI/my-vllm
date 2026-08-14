@@ -42,12 +42,32 @@ source /home/kasw/workspace/gpu-infra/.venv/bin/activate
 # Offline inference (V1 engine)
 python run.py
 
+# Compile the CUDA extension (always pin to 3 cores — the build uses
+# ninja and parallel nvcc invocations can OOM the host on small dev boxes).
+# Use MAX_JOBS=3 or `-j3` to be safe.
+MAX_JOBS=3 python setup.py build_ext --inplace
+
 # Run all tests
 pytest tests/
 
 # Run a single test file or class
 pytest tests/test_C031_runtime.py -v
 ```
+
+**Test expectations — not all tests must pass at any single Cxxx.**
+
+The test suite has historical expectations that evolved across the Cxxx
+commit series.  When validating a specific commit:
+
+  - `git tag Cxxx-name` marks the test set that commit was validated
+    against.  Run those tests at that commit and they all pass.
+  - Newer commits may intentionally break older test expectations as
+    the architecture evolves (e.g. C031 references files that were
+    later deleted in C151's cleanup).  Running `pytest tests/` against
+    the latest commit will surface a mix of expected failures from
+    pre-cleanup eras — that's normal.
+  - When in doubt: `git checkout Cxxx-name` and run the test files
+    whose `test_Cxxx_*.py` filename matches that stage number.
 
 There is no CI, no lint, no formatter, no typecheck configured.
 
